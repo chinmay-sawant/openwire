@@ -193,6 +193,12 @@ func mapInodeToPID() map[string]int {
 	return out
 }
 
+// ProcessName returns the process comm/exe basename for a PID (Linux).
+func ProcessName(pid int) string {
+	name, _ := procName(pid)
+	return name
+}
+
 func procName(pid int) (name, path string) {
 	base := filepath.Join("/proc", strconv.Itoa(pid))
 	if b, err := os.ReadFile(filepath.Join(base, "comm")); err == nil {

@@ -16,11 +16,30 @@ Single foreground process. No daemon, no installer.
 
 | Mode | How selected | What it does |
 |------|----------------|--------------|
-| `live` | AF_PACKET open succeeds | Full packet observation + `/proc` process attribution |
-| `stats` | AF_PACKET fails with privilege error (default fallback) | `/proc/net/dev` byte deltas + socket→process weights (best-effort) |
+| `live` | AF_PACKET open succeeds | Full packet observation + `/proc` process attribution; optional `--pcap` archive |
+| `stats` (deep) | AF_PACKET unavailable and conntrack readable, or `--deep` | `nf_conntrack` byte deltas + process maps; optional `--ebpf` |
+| `stats` (proc) | AF_PACKET fails and no conntrack | `/proc/net/dev` proportional split (best-effort) |
 | `demo` | `--demo` | Synthetic multi-app traffic |
 
-`--strict-capture` disables the `stats` fallback. Demo data is **never** used unless `--demo` is set.
+`--strict-capture` disables unprivileged fallbacks. Demo data is **never** used unless `--demo` is set.
+
+### PCAP archive
+
+```bash
+sudo openwire start --pcap /tmp/openwire.pcap --pcap-max-mb 256
+```
+
+Writes classic libpcap (Ethernet) frames from AF_PACKET. Rotates to `*.pcap.1` when the size limit is hit. Open in Wireshark.
+
+### Deep / eBPF attribution
+
+```bash
+sudo openwire start --deep --ebpf
+```
+
+- **Deep (conntrack):** reads `/proc/net/nf_conntrack` for per-flow byte counters and maps local sockets to processes via `/proc`.
+- **eBPF (optional):** kprobe on `tcp_sendmsg` counting send events per PID (amd64). Needs CAP_BPF/root and tracefs. Soft-fails if unavailable.
+- On a live AF_PACKET session, `--ebpf` adds a side-channel of send counters without replacing packet capture.
 
 ## Privileges
 
@@ -71,4 +90,4 @@ Logs go to a file under the same state directory so they do not corrupt the TUI.
 
 ## Out of scope (still)
 
-Firewall rules, DNS interception, Portmaster client, Gin/React UI, system service, full packet hex dissector, native Windows ETW agent, eBPF deep attribution.
+Firewall rules, DNS interception, Portmaster client, Gin/React UI, system service, full in-TUI packet hex dissector, native Windows ETW agent.

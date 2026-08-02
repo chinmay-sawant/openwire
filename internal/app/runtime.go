@@ -30,6 +30,14 @@ type Config struct {
 	DBPath string
 	// NoDB disables SQLite persistence entirely.
 	NoDB bool
+	// PCAPPath writes a Wireshark-compatible capture when non-empty (live AF_PACKET only).
+	PCAPPath string
+	// PCAPMaxMB rotates the pcap file after this many megabytes (0 = unbounded).
+	PCAPMaxMB int
+	// Deep prefers conntrack-based deep attribution when AF_PACKET is unavailable.
+	Deep bool
+	// EBPF enables optional eBPF kprobe counters (best-effort; requires privileges).
+	EBPF bool
 }
 
 // Run starts capture (or demo) and the Bubble Tea UI. Blocks until quit.
@@ -66,12 +74,13 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	var (
-		engine capture.Engine
-		mode   domain.CaptureMode
-		attrs  *capture.Attributor
-		ifaces []string
-		privOK bool
-		msg    string
+		engine     capture.Engine
+		mode       domain.CaptureMode
+		attrs      *capture.Attributor
+		ifaces     []string
+		privOK     bool
+		msg        string
+		pcapWriter *capture.PCAPWriter
 	)
 
 	if cfg.Demo {
@@ -90,11 +99,7 @@ func Run(ctx context.Context, cfg Config) error {
 		privOK = true
 		msg = "demo mode"
 		store.SetStatus(domain.Status{
-			Mode:        mode,
-			Running:     true,
-			PrivilegeOK: privOK,
-			Message:     msg,
-			IsWSL2:      isWSL,
+			Mode: mode, Running: true, PrivilegeOK: privOK, Message: msg, IsWSL2: isWSL,
 		})
 	} else {
 		linuxAdapters, err := capture.ListLinuxAdapters()
@@ -112,35 +117,76 @@ func Run(ctx context.Context, cfg Config) error {
 			return domain.ErrNoAdapters
 		}
 
-		// Prefer AF_PACKET; fall back to unprivileged /proc stats unless --strict-capture.
-		if err := capture.CanOpenCapture(ifaces[0]); err != nil {
-			if cfg.StrictCapture || !errors.Is(err, domain.ErrInsufficientPrivilege) {
-				return err
+		afErr := capture.CanOpenCapture(ifaces[0])
+		switch {
+		case afErr == nil:
+			mode = domain.ModeLive
+			le := &capture.LinuxEngine{}
+			if cfg.PCAPPath != "" {
+				max := int64(cfg.PCAPMaxMB) * 1024 * 1024
+				if cfg.PCAPMaxMB <= 0 {
+					max = 256 * 1024 * 1024
+				}
+				w, err := capture.NewPCAPWriter(cfg.PCAPPath, max)
+				if err != nil {
+					return fmt.Errorf("pcap: %w", err)
+				}
+				pcapWriter = w
+				le.PCAP = w
+				msg = "packet capture (AF_PACKET) · pcap " + cfg.PCAPPath
+			} else {
+				msg = "packet capture (AF_PACKET)"
+			}
+			engine = le
+			attrs = capture.NewAttributor(2 * time.Second)
+			privOK = true
+
+		case cfg.Deep || (afErr != nil && capture.ConntrackAvailable() && !cfg.StrictCapture):
+			// Deep: conntrack (+ optional eBPF) when raw capture is unavailable.
+			if cfg.StrictCapture && !cfg.Deep {
+				return afErr
+			}
+			mode = domain.ModeStats
+			engine = &capture.DeepEngine{
+				Interval: time.Second,
+				UseEBPF:  cfg.EBPF,
+				Attr:     capture.NewAttributor(2 * time.Second),
+			}
+			privOK = true
+			msg = "deep attribution (conntrack"
+			if cfg.EBPF {
+				msg += "+ebpf"
+			}
+			msg += ")"
+			if afErr != nil {
+				slog.Warn("AF_PACKET unavailable; using deep attribution", "err", afErr)
+			}
+
+		case afErr != nil:
+			if cfg.StrictCapture || !errors.Is(afErr, domain.ErrInsufficientPrivilege) {
+				return afErr
 			}
 			mode = domain.ModeStats
 			engine = &capture.ProcStatsEngine{Interval: time.Second}
 			attrs = capture.NewAttributor(2 * time.Second)
 			privOK = false
 			msg = "stats mode (no CAP_NET_RAW): /proc counters, best-effort per-app"
-			slog.Warn("falling back to unprivileged stats mode", "err", err)
-		} else {
-			mode = domain.ModeLive
-			engine = &capture.LinuxEngine{}
-			attrs = capture.NewAttributor(2 * time.Second)
-			privOK = true
-			msg = "packet capture (AF_PACKET)"
+			slog.Warn("falling back to unprivileged stats mode", "err", afErr)
+
+		default:
+			return fmt.Errorf("no capture path available")
 		}
+
 		store.SetStatus(domain.Status{
-			Mode:        mode,
-			Running:     true,
-			PrivilegeOK: privOK,
-			Message:     msg,
-			IsWSL2:      isWSL,
+			Mode: mode, Running: true, PrivilegeOK: privOK, Message: msg, IsWSL2: isWSL,
 		})
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if pcapWriter != nil {
+		defer pcapWriter.Close()
+	}
 
 	obs, errCh, err := engine.Start(runCtx, ifaces)
 	if err != nil {
@@ -151,6 +197,15 @@ func Run(ctx context.Context, cfg Config) error {
 		go attrs.Run(runCtx.Done())
 	}
 
+	// Optional eBPF side-channel on live AF_PACKET path (does not replace packet capture).
+	if cfg.EBPF && mode == domain.ModeLive && !cfg.Demo {
+		go runEBPFSide(runCtx, store, ifaces)
+		msg += " · ebpf side-counters"
+		store.SetStatus(domain.Status{
+			Mode: mode, Running: true, PrivilegeOK: privOK, Message: msg, IsWSL2: isWSL,
+		})
+	}
+
 	if rec != nil {
 		go rec.Run(runCtx, store)
 		if msg != "" {
@@ -158,20 +213,14 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		msg += "db " + rec.Path()
 		store.SetStatus(domain.Status{
-			Mode:        mode,
-			Running:     true,
-			PrivilegeOK: privOK,
-			Message:     msg,
-			IsWSL2:      isWSL,
+			Mode: mode, Running: true, PrivilegeOK: privOK, Message: msg, IsWSL2: isWSL,
 		})
 	}
 
-	// WSL2: sample Windows host adapter counters into store (inventory rates + windows-host app).
 	if isWSL && !cfg.Demo {
 		go sampleHostLoop(runCtx, store, isWSL, mode, privOK, msg)
 	}
 
-	// Ingest loop.
 	go func() {
 		for {
 			select {
@@ -217,9 +266,60 @@ func Run(ctx context.Context, cfg Config) error {
 	return err
 }
 
+func runEBPFSide(ctx context.Context, store *memory.Store, ifaces []string) {
+	c, err := capture.StartEBPFCounters(ctx)
+	if err != nil {
+		slog.Warn("ebpf side-counters unavailable", "err", err)
+		return
+	}
+	defer c.Close()
+	iface := "ebpf"
+	if len(ifaces) > 0 {
+		iface = ifaces[0]
+	}
+	prev := map[uint32]uint64{}
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			cur, err := c.Snapshot()
+			if err != nil {
+				continue
+			}
+			for pid, total := range cur {
+				p := prev[pid]
+				var d uint64
+				if total >= p {
+					d = total - p
+				}
+				prev[pid] = total
+				if d == 0 {
+					continue
+				}
+				name := capture.ProcessName(int(pid))
+				if name == "" {
+					name = fmt.Sprintf("pid:%d", pid)
+				}
+				// Event counts scaled so send-heavy apps appear when AF_PACKET is quiet.
+				store.Ingest(domain.Observation{
+					Time:      now,
+					Iface:     iface,
+					Direction: domain.DirectionTx,
+					Length:    int(d * 512),
+					Protocol:  domain.ProtoTCP,
+					AppHint:   name,
+					PIDHint:   int(pid),
+				})
+			}
+		}
+	}
+}
+
 func sampleHostLoop(ctx context.Context, store *memory.Store, isWSL bool, mode domain.CaptureMode, privOK bool, baseMsg string) {
 	prev := map[string]wsl.HostAdapterStats{}
-	// First sample only seeds prev (no deltas).
 	if stats := wsl.SampleHostAdapterStats(ctx); len(stats) > 0 {
 		adapters := store.ListAdapters()
 		merged, next := wsl.MergeHostStatsIntoAdapters(adapters, stats, nil, 1)
@@ -239,11 +339,9 @@ func sampleHostLoop(ctx context.Context, store *memory.Store, isWSL bool, mode d
 				continue
 			}
 			adapters := store.ListAdapters()
-			merged, nextPrev := wsl.MergeHostStatsIntoAdapters(adapters, stats, prev, 2.0)
+			merged, _ := wsl.MergeHostStatsIntoAdapters(adapters, stats, prev, 2.0)
 			store.SetAdapters(merged)
-			_ = nextPrev
 
-			// Best-effort Windows per-process split (connection-weighted).
 			procs := wsl.ListWindowsProcesses(ctx)
 			obs, next := wsl.HostTrafficObservationsByProcess(now, stats, prev, procs)
 			prev = next
@@ -260,11 +358,7 @@ func sampleHostLoop(ctx context.Context, store *memory.Store, isWSL bool, mode d
 				msg += "windows host counters"
 			}
 			store.SetStatus(domain.Status{
-				Mode:        mode,
-				Running:     true,
-				PrivilegeOK: privOK,
-				Message:     msg,
-				IsWSL2:      isWSL,
+				Mode: mode, Running: true, PrivilegeOK: privOK, Message: msg, IsWSL2: isWSL,
 			})
 		}
 	}

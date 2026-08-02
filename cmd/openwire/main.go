@@ -30,6 +30,10 @@ func main() {
 		strictCapture bool
 		dbPath        string
 		noDB          bool
+		pcapPath      string
+		pcapMaxMB     int
+		deep          bool
+		ebpf          bool
 	)
 
 	start := &cobra.Command{
@@ -52,6 +56,10 @@ func main() {
 				StrictCapture: strictCapture,
 				DBPath:        dbPath,
 				NoDB:          noDB,
+				PCAPPath:      pcapPath,
+				PCAPMaxMB:     pcapMaxMB,
+				Deep:          deep,
+				EBPF:          ebpf,
 			})
 		},
 	}
@@ -63,6 +71,10 @@ func main() {
 	start.Flags().BoolVar(&strictCapture, "strict-capture", false, "require AF_PACKET privileges; do not fall back to /proc stats mode")
 	start.Flags().StringVar(&dbPath, "db", "", "SQLite history path (default: $XDG_STATE_HOME/openwire/openwire.db)")
 	start.Flags().BoolVar(&noDB, "no-db", false, "disable SQLite persistence")
+	start.Flags().StringVar(&pcapPath, "pcap", "", "write Wireshark-compatible packet capture to this path (live AF_PACKET only)")
+	start.Flags().IntVar(&pcapMaxMB, "pcap-max-mb", 256, "rotate pcap after this many MiB (keeps .1 backup)")
+	start.Flags().BoolVar(&deep, "deep", false, "prefer conntrack deep attribution when AF_PACKET is unavailable")
+	start.Flags().BoolVar(&ebpf, "ebpf", false, "enable best-effort eBPF kprobe counters (needs CAP_BPF/root + tracefs)")
 
 	root.AddCommand(start)
 

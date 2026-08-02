@@ -21,6 +21,8 @@ import (
 // LinuxEngine captures using AF_PACKET raw sockets (no libpcap/CGO).
 type LinuxEngine struct {
 	LocalNets []*net.IPNet
+	// PCAP is an optional packet archive writer (Wireshark-compatible).
+	PCAP *PCAPWriter
 }
 
 // Start implements Engine. Requires CAP_NET_RAW or root.
@@ -41,6 +43,7 @@ func (e *LinuxEngine) Start(ctx context.Context, ifaces []string) (<-chan domain
 
 	obs := make(chan domain.Observation, 1024)
 	errs := make(chan error, 4)
+	pcap := e.PCAP
 
 	var wg sync.WaitGroup
 	for _, name := range ifaces {
@@ -48,7 +51,7 @@ func (e *LinuxEngine) Start(ctx context.Context, ifaces []string) (<-chan domain
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := captureIface(ctx, name, local, obs); err != nil && ctx.Err() == nil {
+			if err := captureIface(ctx, name, local, obs, pcap); err != nil && ctx.Err() == nil {
 				select {
 				case errs <- fmt.Errorf("%s: %w", name, err):
 				default:
@@ -87,7 +90,7 @@ func openAFPacket(iface string) (int, error) {
 	return fd, nil
 }
 
-func captureIface(ctx context.Context, iface string, local []*net.IPNet, out chan<- domain.Observation) error {
+func captureIface(ctx context.Context, iface string, local []*net.IPNet, out chan<- domain.Observation, pcap *PCAPWriter) error {
 	fd, err := openAFPacket(iface)
 	if err != nil {
 		if isPerm(err) {
@@ -122,11 +125,20 @@ func captureIface(ctx context.Context, iface string, local []*net.IPNet, out cha
 		if n < 14 {
 			continue
 		}
+		now := time.Now()
+		if pcap != nil {
+			// Copy frame for archive; capture buffer is reused.
+			frame := make([]byte, n)
+			copy(frame, buf[:n])
+			if err := pcap.WritePacket(now, frame); err != nil {
+				slog.Debug("pcap write", "err", err)
+			}
+		}
 		o, ok := parseEthernet(buf[:n], iface, local)
 		if !ok {
 			continue
 		}
-		o.Time = time.Now()
+		o.Time = now
 		select {
 		case out <- o:
 		case <-ctx.Done():

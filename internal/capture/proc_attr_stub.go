@@ -3,6 +3,7 @@
 package capture
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/chinmay-sawant/openwire/internal/domain"
@@ -21,3 +22,6 @@ func (a *Attributor) Run(done <-chan struct{}) {}
 
 // Annotate is a no-op.
 func (a *Attributor) Annotate(o *domain.Observation) {}
+
+// ProcessName is unavailable off Linux.
+func ProcessName(pid int) string { return fmt.Sprintf("pid:%d", pid) }

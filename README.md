@@ -34,6 +34,12 @@ sudo ./bin/openwire start --iface eth0
 # SQLite history (default: ~/.local/state/openwire/openwire.db)
 ./bin/openwire start --demo --db /tmp/openwire.db
 ./bin/openwire start --no-db
+
+# Packet archive (Wireshark) — needs live AF_PACKET privileges
+sudo ./bin/openwire start --pcap /tmp/openwire.pcap --pcap-max-mb 128
+
+# Deep attribution (conntrack) + optional eBPF when AF_PACKET is unavailable
+sudo ./bin/openwire start --deep --ebpf
 ```
 
 Or with capabilities instead of full root:
@@ -60,6 +66,9 @@ make test-live   # docker + CAP_NET_RAW; skips/no-ops if docker unavailable
 | Linux adapter discovery | yes |
 | Live AF_PACKET capture | yes (needs privileges) |
 | Unprivileged `/proc` stats mode | yes (default fallback) |
+| Deep attribution (nf_conntrack) | yes (`--deep` / auto when no AF_PACKET) |
+| eBPF kprobe counters | best-effort (`--ebpf`, needs privileges) |
+| PCAP packet archive | yes (`--pcap`, live AF_PACKET) |
 | In-memory store (bounded) | yes |
 | Per-app bandwidth ranking | yes (`/proc` attribution on Linux) |
 | GlassWire-style sparkline graph | yes |
