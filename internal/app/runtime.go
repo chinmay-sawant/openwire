@@ -11,8 +11,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chinmay-sawant/openwire/internal/capture"
 	"github.com/chinmay-sawant/openwire/internal/domain"
+	"github.com/chinmay-sawant/openwire/internal/platform/paths"
 	"github.com/chinmay-sawant/openwire/internal/platform/wsl"
 	"github.com/chinmay-sawant/openwire/internal/store/memory"
+	"github.com/chinmay-sawant/openwire/internal/store/sqlite"
 	"github.com/chinmay-sawant/openwire/internal/tui"
 )
 
@@ -24,12 +26,44 @@ type Config struct {
 	LogLevel string
 	// StrictCapture disables unprivileged /proc stats fallback when AF_PACKET is unavailable.
 	StrictCapture bool
+	// DBPath is the SQLite file; empty + NoDB=false uses the default state-dir path.
+	DBPath string
+	// NoDB disables SQLite persistence entirely.
+	NoDB bool
 }
 
 // Run starts capture (or demo) and the Bubble Tea UI. Blocks until quit.
 func Run(ctx context.Context, cfg Config) error {
 	store := memory.New(memory.Config{})
 	isWSL := wsl.IsWSL2()
+
+	var rec *sqlite.Recorder
+	if !cfg.NoDB {
+		dbPath := cfg.DBPath
+		if dbPath == "" {
+			p, err := paths.DefaultDBPath()
+			if err != nil {
+				slog.Warn("default db path", "err", err)
+			} else {
+				dbPath = p
+			}
+		}
+		if dbPath != "" {
+			r, err := sqlite.Open(dbPath)
+			if err != nil {
+				slog.Warn("sqlite open failed; continuing without persistence", "err", err, "path", dbPath)
+			} else {
+				rec = r
+				defer rec.Close()
+				if hist, err := rec.LoadRecentSamples(120); err != nil {
+					slog.Warn("sqlite load samples", "err", err)
+				} else if len(hist) > 0 {
+					store.LoadSamples(hist)
+					slog.Info("loaded historical samples", "n", len(hist), "db", dbPath)
+				}
+			}
+		}
+	}
 
 	var (
 		engine capture.Engine
@@ -115,6 +149,21 @@ func Run(ctx context.Context, cfg Config) error {
 
 	if attrs != nil {
 		go attrs.Run(runCtx.Done())
+	}
+
+	if rec != nil {
+		go rec.Run(runCtx, store)
+		if msg != "" {
+			msg += " · "
+		}
+		msg += "db " + rec.Path()
+		store.SetStatus(domain.Status{
+			Mode:        mode,
+			Running:     true,
+			PrivilegeOK: privOK,
+			Message:     msg,
+			IsWSL2:      isWSL,
+		})
 	}
 
 	// WSL2: sample Windows host adapter counters into store (inventory rates + windows-host app).

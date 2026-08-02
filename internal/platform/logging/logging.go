@@ -8,17 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/chinmay-sawant/openwire/internal/platform/paths"
 )
 
 // Setup installs a default slog logger writing to a state-dir log file.
 // Returns the log path (may be empty if falling back to discard).
 func Setup(level string) (logPath string, closer io.Closer, err error) {
-	dir, err := stateDir()
+	dir, err := paths.EnsureStateDir()
 	if err != nil {
-		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-		return "", nopCloser{}, nil
-	}
-	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
 		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 		return "", nopCloser{}, nil
 	}
@@ -31,17 +29,6 @@ func Setup(level string) (logPath string, closer io.Closer, err error) {
 	lvl := parseLevel(level)
 	slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: lvl})))
 	return path, f, nil
-}
-
-func stateDir() (string, error) {
-	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "openwire"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "openwire"), nil
-	}
-	return filepath.Join(home, ".local", "state", "openwire"), nil
 }
 
 func parseLevel(s string) slog.Level {

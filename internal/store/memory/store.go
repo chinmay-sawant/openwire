@@ -321,6 +321,45 @@ func (s *Store) SetAppPath(appKey, path string) {
 	}
 }
 
+// LoadSamples prepends historical samples (e.g. from SQLite) into the ring.
+// Existing live samples are kept after history; the ring is then trimmed to MaxSamples.
+func (s *Store) LoadSamples(history []domain.BandwidthSample) {
+	if len(history) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	merged := make([]domain.BandwidthSample, 0, len(history)+len(s.samples))
+	merged = append(merged, history...)
+	merged = append(merged, s.samples...)
+	if len(merged) > s.cfg.MaxSamples {
+		merged = merged[len(merged)-s.cfg.MaxSamples:]
+	}
+	s.samples = merged
+	if len(s.samples) > 0 {
+		last := s.samples[len(s.samples)-1]
+		s.lastSampleAt = last.Time
+		s.status.TotalRxBps = last.RxBps
+		s.status.TotalTxBps = last.TxBps
+	}
+}
+
+// SamplesSince returns samples with Time strictly after t (for incremental flush).
+func (s *Store) SamplesSince(t time.Time) []domain.BandwidthSample {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if t.IsZero() {
+		return append([]domain.BandwidthSample(nil), s.samples...)
+	}
+	out := make([]domain.BandwidthSample, 0, len(s.samples))
+	for _, sm := range s.samples {
+		if sm.Time.After(t) {
+			out = append(out, sm)
+		}
+	}
+	return out
+}
+
 func (s *Store) evictOldestFlow() {
 	var oldestKey string
 	var oldest time.Time

@@ -30,6 +30,10 @@ sudo ./bin/openwire start
 
 # Optional: pin interfaces
 sudo ./bin/openwire start --iface eth0
+
+# SQLite history (default: ~/.local/state/openwire/openwire.db)
+./bin/openwire start --demo --db /tmp/openwire.db
+./bin/openwire start --no-db
 ```
 
 Or with capabilities instead of full root:
@@ -62,7 +66,7 @@ make test-live   # docker + CAP_NET_RAW; skips/no-ops if docker unavailable
 | Demo mode | yes (`--demo`) |
 | WSL2 host adapter listing | best-effort via `powershell.exe` / `ipconfig.exe` |
 | WSL2 host byte counters | best-effort (`windows-host` app) |
-| SQLite / disk history | later |
+| SQLite history (samples + app snapshots) | yes (`--db` / default state dir; `--no-db` to disable) |
 | Firewall / DNS control | no (non-goal) |
 
 ## How it works

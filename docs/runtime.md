@@ -38,9 +38,14 @@ Without privileges, OpenWire enters **stats mode** (clearly labeled in the UI) u
 
 ## Where data lives
 
-v0.0.1 keeps flows, per-app counters, and bandwidth samples **in memory only** (bounded maps and a ring buffer). Nothing is written to SQLite or disk for traffic data.
+- **Live UI data** stays in a bounded **in-memory** store (flows, app counters, sample ring).
+- **SQLite history** (v0.0.2+) optionally persists bandwidth samples and periodic app snapshots:
+  - default path: `$XDG_STATE_HOME/openwire/openwire.db` (or `~/.local/state/openwire/openwire.db`)
+  - override with `--db PATH`
+  - disable with `--no-db`
+  - on start, recent samples are loaded into the graph ring
 
-Logs (if any) go to a file under the state directory so they do not corrupt the TUI.
+Logs go to a file under the same state directory so they do not corrupt the TUI.
 
 ## Platforms
 

@@ -28,6 +28,8 @@ func main() {
 		theme         string
 		logLevel      string
 		strictCapture bool
+		dbPath        string
+		noDB          bool
 	)
 
 	start := &cobra.Command{
@@ -48,6 +50,8 @@ func main() {
 				Theme:         theme,
 				LogLevel:      logLevel,
 				StrictCapture: strictCapture,
+				DBPath:        dbPath,
+				NoDB:          noDB,
 			})
 		},
 	}
@@ -57,6 +61,8 @@ func main() {
 	start.Flags().StringVar(&theme, "theme", "dark", "UI theme (default: dark)")
 	start.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug|info|warn|error")
 	start.Flags().BoolVar(&strictCapture, "strict-capture", false, "require AF_PACKET privileges; do not fall back to /proc stats mode")
+	start.Flags().StringVar(&dbPath, "db", "", "SQLite history path (default: $XDG_STATE_HOME/openwire/openwire.db)")
+	start.Flags().BoolVar(&noDB, "no-db", false, "disable SQLite persistence")
 
 	root.AddCommand(start)
 
