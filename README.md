@@ -65,7 +65,8 @@ make test-live   # docker + CAP_NET_RAW; skips/no-ops if docker unavailable
 | GlassWire-style sparkline graph | yes |
 | Demo mode | yes (`--demo`) |
 | WSL2 host adapter listing | best-effort via `powershell.exe` / `ipconfig.exe` |
-| WSL2 host byte counters | best-effort (`windows-host` app) |
+| WSL2 host byte counters | best-effort |
+| WSL2 Windows per-process usage | best-effort connection-weighted (`win/<name>`) |
 | SQLite history (samples + app snapshots) | yes (`--db` / default state dir; `--no-db` to disable) |
 | Firewall / DNS control | no (non-goal) |
 
@@ -100,9 +101,10 @@ When OpenWire detects WSL2 it will:
 
 - Capture/sample on **Linux** interfaces (AF_PACKET or `/proc` stats)
 - List **Windows host adapters** (labeled `win:…`)
-- Sample host adapter **byte counters** into a synthetic app **`windows-host`**
+- Sample host adapter **byte counters**
+- Attribute host traffic to Windows processes as **`win/<name>`** by open-connection weight (fallback aggregate app `windows-host`)
 
-**Limits:** Windows applications are not Linux PIDs. Per-process Windows attribution is not available from inside WSL2 (future native helper). Linux process attribution applies to Linux processes only.
+**Limits:** Attribution is connection-weighted host NIC deltas (not ETW packet capture). Linux process attribution still applies only to Linux processes.
 
 See [`docs/runtime.md`](docs/runtime.md) for the full runtime contract.
 

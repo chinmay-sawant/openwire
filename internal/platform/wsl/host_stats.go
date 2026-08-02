@@ -113,54 +113,13 @@ func MergeHostStatsIntoAdapters(
 
 // HostTrafficObservations converts host adapter deltas into store-friendly observations
 // attributed to a synthetic "windows-host" application (not a Linux PID).
+// Prefer HostTrafficObservationsByProcess when a Windows process list is available.
 func HostTrafficObservations(
 	now time.Time,
 	stats []HostAdapterStats,
 	prev map[string]HostAdapterStats,
 ) (obs []domain.Observation, next map[string]HostAdapterStats) {
-	next = make(map[string]HostAdapterStats, len(stats))
-	for _, s := range stats {
-		next[s.Name] = s
-		p, ok := prev[s.Name]
-		if !ok {
-			continue
-		}
-		var drx, dtx uint64
-		if s.RxBytes >= p.RxBytes {
-			drx = s.RxBytes - p.RxBytes
-		}
-		if s.TxBytes >= p.TxBytes {
-			dtx = s.TxBytes - p.TxBytes
-		}
-		if drx > 0 {
-			obs = append(obs, domain.Observation{
-				Time:      now,
-				Iface:     "win:" + s.Name,
-				Direction: domain.DirectionRx,
-				Length:    clampInt(drx),
-				Protocol:  domain.ProtoOther,
-				AppHint:   "windows-host",
-				PIDHint:   0,
-			})
-		}
-		if dtx > 0 {
-			obs = append(obs, domain.Observation{
-				Time:      now,
-				Iface:     "win:" + s.Name,
-				Direction: domain.DirectionTx,
-				Length:    clampInt(dtx),
-				Protocol:  domain.ProtoOther,
-				AppHint:   "windows-host",
-				PIDHint:   0,
-			})
-		}
-	}
-	for k, v := range prev {
-		if _, ok := next[k]; !ok {
-			next[k] = v
-		}
-	}
-	return obs, next
+	return HostTrafficObservationsByProcess(now, stats, prev, nil)
 }
 
 func clampInt(n uint64) int {

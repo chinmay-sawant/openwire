@@ -241,10 +241,12 @@ func sampleHostLoop(ctx context.Context, store *memory.Store, isWSL bool, mode d
 			adapters := store.ListAdapters()
 			merged, nextPrev := wsl.MergeHostStatsIntoAdapters(adapters, stats, prev, 2.0)
 			store.SetAdapters(merged)
-
-			obs, next := wsl.HostTrafficObservations(now, stats, prev)
-			prev = next
 			_ = nextPrev
+
+			// Best-effort Windows per-process split (connection-weighted).
+			procs := wsl.ListWindowsProcesses(ctx)
+			obs, next := wsl.HostTrafficObservationsByProcess(now, stats, prev, procs)
+			prev = next
 			for _, o := range obs {
 				store.Ingest(o)
 			}
@@ -252,7 +254,11 @@ func sampleHostLoop(ctx context.Context, store *memory.Store, isWSL bool, mode d
 			if msg != "" {
 				msg += " · "
 			}
-			msg += "windows host counters"
+			if len(procs) > 0 {
+				msg += fmt.Sprintf("win processes %d", len(procs))
+			} else {
+				msg += "windows host counters"
+			}
 			store.SetStatus(domain.Status{
 				Mode:        mode,
 				Running:     true,

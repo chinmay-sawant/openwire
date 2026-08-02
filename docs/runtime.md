@@ -52,14 +52,16 @@ Logs go to a file under the same state directory so they do not corrupt the TUI.
 | Platform | Capture | Notes |
 |----------|---------|--------|
 | Linux | Primary | Adapter discovery + AF_PACKET or `/proc` stats + process attribution |
-| WSL2 | Supported secondary | Linux path as above + best-effort Windows host adapter inventory **and** host byte counters (`windows-host` app) |
-| Windows / macOS native | Out of scope | v0.0.1 |
+| WSL2 | Supported secondary | Linux path + host adapters + connection-weighted Windows process apps (`win/<name>`) |
+| Windows / macOS native | Out of scope | no native agent yet |
 
-### WSL2 host traffic (P5.4)
+### WSL2 host traffic
 
 - Host adapters are listed via PowerShell / `ipconfig` when available.
-- Host **byte counters** are sampled via `Get-NetAdapterStatistics` and shown as a synthetic app `windows-host` (not a Linux PID).
-- Per-process Windows attribution is **not** available from inside WSL2; that needs a future native Windows helper.
+- Host **byte counters** are sampled via `Get-NetAdapterStatistics`.
+- **Per-process Windows attribution (best-effort):** list Windows TCP/UDP endpoints (`Get-NetTCPConnection` / `Get-NetUDPEndpoint`) and process names, then distribute each interval’s host NIC byte **delta** across those processes by **open-connection weight**. Apps appear as `win/<ProcessName>` (Windows PID in detail).
+- If the process list is unavailable, traffic is attributed to the aggregate app `windows-host`.
+- This is **not** packet-accurate ETW/WFP accounting; it is a practical WSL2 estimate without a native Windows agent.
 
 ## TUI
 
@@ -67,6 +69,6 @@ Logs go to a file under the same state directory so they do not corrupt the TUI.
 - Mouse and arrow-key navigation
 - Default home: apps by bandwidth + live graph
 
-## Out of scope (v0.0.1)
+## Out of scope (still)
 
-Firewall rules, DNS interception, Portmaster client, Gin/React UI, system service, full packet hex dissector, SQLite persistence.
+Firewall rules, DNS interception, Portmaster client, Gin/React UI, system service, full packet hex dissector, native Windows ETW agent, eBPF deep attribution.
