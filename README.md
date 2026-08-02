@@ -2,29 +2,16 @@
 
 Terminal network monitor: capture local traffic (Wireshark-style observation), keep it in memory, and show **which applications use how much bandwidth** in a **GlassWire-like Bubble Tea UI**.
 
-> Status: **planned** — see [`plans/v0.0.1/init/`](plans/v0.0.1/init/00-overview.md). Implementation has not started.
-
-## Goals (v0.0.1)
-
-| Goal | Detail |
-|------|--------|
-| One command | `openwire start` opens the UI |
-| Capture | Monitor traffic on local network adapters (Linux first) |
-| Store | In-memory only for now (SQLite later) |
-| Default view | Apps ranked by network use + live bandwidth graph |
-| TUI | Bubble Tea, **dark theme by default** |
-| Input | **Mouse** and **arrow keys** |
-| WSL2 | Detect Windows host adapters; honest limits on Windows process attribution |
-
 ## Requirements
 
-- **Go 1.26.4**
-- **Linux** for live capture (primary target)
-- **libpcap** (or documented AF_PACKET path) and capture privileges for live mode  
-  Typically root, or capabilities such as `CAP_NET_RAW` / `CAP_NET_ADMIN`
-- A terminal that supports colors and (optionally) mouse events
+- **Go 1.26.4** (toolchain auto-download via `GOTOOLCHAIN=go1.26.4` if needed)
+- **Linux** for live capture (primary target; WSL2 supported as secondary)
+- Capture privileges for live mode: root or `CAP_NET_RAW` / `CAP_NET_ADMIN`
+- Terminal with color support (mouse optional but supported)
 
-## Quick start (once implemented)
+No libpcap/CGO: live capture uses pure-Go **AF_PACKET**.
+
+## Quick start
 
 ```bash
 # Build
@@ -33,79 +20,108 @@ make build
 # Demo UI — no root, synthetic traffic
 ./bin/openwire start --demo
 
-# Live monitor (needs privileges + adapters)
+# Live monitor (needs privileges)
 sudo ./bin/openwire start
 
 # Optional: pin interfaces
-sudo ./bin/openwire start --iface eth0 --iface wlan0
+sudo ./bin/openwire start --iface eth0
 ```
+
+Or with capabilities instead of full root:
+
+```bash
+make build
+sudo setcap cap_net_raw,cap_net_admin+ep ./bin/openwire
+./bin/openwire start
+```
+
+## Features (v0.0.1)
+
+| Feature | Status |
+|---------|--------|
+| `openwire start` one-command UI | yes |
+| Dark theme default | yes |
+| Mouse + arrow-key navigation | yes |
+| Linux adapter discovery | yes |
+| Live AF_PACKET capture | yes (needs privileges) |
+| In-memory store (bounded) | yes |
+| Per-app bandwidth ranking | yes (`/proc` attribution on Linux) |
+| GlassWire-style sparkline graph | yes |
+| Demo mode | yes (`--demo`) |
+| WSL2 host adapter listing | best-effort via `powershell.exe` / `ipconfig.exe` |
+| SQLite / disk history | later |
+| Firewall / DNS control | no (non-goal) |
 
 ## How it works
 
 ```text
-adapters ──► capture ──► in-memory store ──► per-app bandwidth
-                              │
-                              └──► Bubble Tea UI (graph + app list)
+adapters ──► capture (demo | AF_PACKET) ──► in-memory store ──► per-app bandwidth
+                                                    │
+                                                    └──► Bubble Tea UI
 ```
 
-1. **Discover** network interfaces on Linux.
-2. **Capture** packets/bytes on selected interfaces.
-3. **Store** flows and samples in a bounded in-memory store.
-4. **Attribute** sockets to processes via `/proc` where possible.
-5. **Render** a dark TUI: live graph, app list, detail pane; navigate with mouse or keys.
+1. Discover network interfaces on Linux (and Windows host adapters under WSL2 when possible).
+2. Capture packets on selected interfaces **or** emit synthetic demo traffic.
+3. Store flows and samples in a bounded in-memory store.
+4. Attribute sockets to processes via `/proc` (Linux live mode).
+5. Render dark TUI: live graph, app list, detail pane.
 
-## UI (target)
+## UI controls
 
-- Dark theme by default  
-- Bandwidth graph over a recent time window (GlassWire-style)  
-- Application list sorted by usage  
-- Status bar with adapters and capture state  
-- Keys: arrows / Tab / Enter / Esc / `q`  
-- Mouse: click to select, scroll lists, focus panes  
+| Input | Action |
+|-------|--------|
+| `↑` / `↓` or `j` / `k` | Move selection |
+| Mouse click / scroll | Select apps / focus panes |
+| `Tab` | Cycle panes |
+| `Enter` | Detail focus |
+| `Esc` | Back to app list |
+| `q` / `Ctrl+C` | Quit |
 
 ## WSL2
 
 When OpenWire detects WSL2 it will:
 
-- List **Linux** interfaces as usual  
-- Attempt to list **Windows host adapters** (e.g. via `powershell.exe` / host commands) and show them labeled as host adapters  
+- Capture on **Linux** interfaces as usual (when privileged)
+- Attempt to list **Windows host adapters** (labeled `win:…`)
 
-**Limits:** Windows applications are not Linux PIDs. Per-app attribution for Windows processes may be incomplete or unavailable inside WSL2; the UI and docs will not pretend otherwise. Host-side counters may be used when available.
+**Limits:** Windows applications are not Linux PIDs. Per-app attribution inside WSL2 applies to Linux processes only. Host adapter listing is inventory/visibility, not full Windows process monitoring.
+
+See [`docs/runtime.md`](docs/runtime.md) for the full runtime contract.
+
+## Development
+
+```bash
+make test
+make vet
+make run    # go run … start --demo
+```
+
+Module path: `github.com/chinmay-sawant/openwire`  
+Plan: [`plans/v0.0.1/init/00-overview.md`](plans/v0.0.1/init/00-overview.md)
+
+## Project layout
+
+```text
+cmd/openwire/              # CLI entry — openwire start
+internal/domain/           # Adapter, Flow, AppUsage, samples
+internal/capture/          # Demo + Linux AF_PACKET + /proc attribution
+internal/store/memory/     # In-memory store
+internal/tui/              # Bubble Tea views
+internal/app/              # Composition / runtime
+internal/platform/         # logging, WSL helpers
+docs/runtime.md            # Runtime contract
+plans/v0.0.1/init/         # Phase-wise plan
+```
 
 ## Non-goals (v0.0.1)
 
 - Firewall / allow–block policies  
 - DNS interception  
-- Full packet-dissector UI (Wireshark expert mode)  
+- Full packet-dissector UI  
 - SQLite / disk persistence  
-- Web UI (Gin + React)  
+- Web UI  
 - Portmaster API client  
-- System service installer / tray app  
-- Native Windows or macOS capture engines (beyond WSL2 host adapter visibility)
-
-## Project layout (planned)
-
-```text
-cmd/openwire/           # CLI entry — openwire start
-internal/domain/        # Adapter, Flow, AppUsage, samples
-internal/capture/       # Linux capture + demo engine
-internal/store/memory/  # In-memory store
-internal/tui/           # Bubble Tea views
-plans/v0.0.1/init/      # Phase-wise implementation plan
-```
-
-## Plans
-
-Canonical plan: **[plans/v0.0.1/init/00-overview.md](plans/v0.0.1/init/00-overview.md)**
-
-| Phase | Focus |
-|-------|--------|
-| 0 | Product goals and runtime contract |
-| 1 | Go 1.26.4 module + `openwire start` skeleton |
-| 2 | Adapter discovery + capture (Linux) |
-| 3 | In-memory store + per-app attribution |
-| 4 | Bubble Tea UI (dark, mouse, graphs) |
-| 5 | WSL2, README polish, release gates |
+- System service installer  
 
 ## License
 

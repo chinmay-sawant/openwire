@@ -1,7 +1,7 @@
 # OpenWire v0.0.1 — Network Traffic Monitor (TUI)
 
 > **Parent:** none — initial product and architecture plan  
-> **Status:** proposed; no implementation started  
+> **Status:** implemented for v0.0.1 vertical slice (demo + Linux AF_PACKET + TUI)  
 > **Estimated effort:** 6 dependency-ordered phases to a one-command usable monitor
 
 ---
@@ -100,15 +100,15 @@ Foreground process only for v0.0.1: no daemon, no system service installer, no t
 
 ## Success Criteria for v0.0.1
 
-- [ ] Built and run with **Go 1.26.4**.
-- [ ] `openwire start` launches the dark Bubble Tea UI in one step.
-- [ ] Mouse clicks and arrow keys can move focus and select apps/rows.
-- [ ] On Linux, adapters are listed and live traffic increments per-app (or process) counters when capture privileges are available.
-- [ ] Without privileges, the app fails with a clear message **or** falls back only when `--demo` is requested (no silent fake data in live mode).
-- [ ] Traffic is held in a bounded in-memory store (no disk DB yet).
-- [ ] Default home view is “apps by bandwidth” + live graph.
-- [ ] README documents install, privileges, WSL2 notes, and limits.
-- [ ] WSL2 path documents/implements host-adapter visibility strategy (Phase 5).
+- [x] Built and run with **Go 1.26.4**.
+- [x] `openwire start` launches the dark Bubble Tea UI in one step (`--demo` without priv; live with priv).
+- [x] Mouse clicks and arrow keys can move focus and select apps/rows.
+- [x] On Linux, adapters are listed; live AF_PACKET capture + `/proc` attribution when privileges allow.
+- [x] Without privileges, live mode fails with a clear message; fake data only via `--demo`.
+- [x] Traffic is held in a bounded in-memory store (no disk DB yet).
+- [x] Default home view is “apps by bandwidth” + live graph.
+- [x] README documents install, privileges, WSL2 notes, and limits.
+- [x] WSL2 path documents/implements host-adapter visibility strategy (Phase 5).
 
 ## Status Rules
 

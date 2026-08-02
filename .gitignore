@@ -2,3 +2,5 @@ portmaster
 .agents
 .codex
 .codex-plugin
+bin/
+*.log

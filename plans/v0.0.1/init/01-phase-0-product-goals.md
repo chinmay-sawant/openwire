@@ -1,7 +1,7 @@
 # OpenWire — Phase 0: Product Goals and Runtime Contract
 
 > **Parent:** [00-overview.md](00-overview.md)  
-> **Status:** proposed; no implementation started  
+> **Status:** implemented (docs + locked decisions)  
 > **Estimated effort:** one product/decision slice
 
 ---
@@ -21,17 +21,13 @@
 
 ## Checklist
 
-- [ ] **P0.1 — Primary command:** lock `openwire start` as the only required user command for the first usable product. Optional flags: `--demo`, `--iface`, `--theme` (default dark), `--log-level`.
-- [ ] **P0.2 — Privilege contract:** document that live capture on Linux typically needs root or `CAP_NET_RAW`/`CAP_NET_ADMIN`. Capture failures must be explicit errors, not silent empty graphs. Demo mode is opt-in only.
-- [ ] **P0.3 — Platform matrix:** v0.0.1 **supports Linux** as the primary capture target. WSL2 is a first-class secondary environment (Phase 5). Native Windows/macOS capture is out of scope for this version.
-- [ ] **P0.4 — Data model sketch:** define stable names for:
-  - `Adapter` (name, index, MAC, IPs, up/down, rx/tx totals)
-  - `Flow` / `Connection` (5-tuple, protocol, bytes in/out, first/last seen, pid if known)
-  - `AppUsage` (process name, pid, path if known, bytes in/out, rate)
-  - `BandwidthSample` (timestamp, total rx/tx, optional per-app rates for the graph)
-- [ ] **P0.5 — Storage contract:** v0.0.1 is **in-memory only** with explicit bounds (max flows, max samples, max apps). Document the eviction policy (e.g. LRU flows, ring buffer for samples). Future SQLite is a non-goal for this milestone.
-- [ ] **P0.6 — TUI contract:** Bubble Tea; dark theme default; panes for graph, app list, detail/status; mouse enable on startup; arrows/tab/enter/esc/q keyboard map.
-- [ ] **P0.7 — Non-goals freeze:** no firewall rules, no DNS hijack, no Portmaster API client, no Gin/React UI, no system service, no packet hex dump UI in v0.0.1.
-- [ ] **P0.8 — README obligation:** Phase 0 decisions must land in the root `README.md` before Phase 6 closes (draft can start earlier).
+- [x] **P0.1 — Primary command:** lock `openwire start` as the only required user command for the first usable product. Optional flags: `--demo`, `--iface`, `--theme` (default dark), `--log-level`.
+- [x] **P0.2 — Privilege contract:** document that live capture on Linux typically needs root or `CAP_NET_RAW`/`CAP_NET_ADMIN`. Capture failures must be explicit errors, not silent empty graphs. Demo mode is opt-in only. → `docs/runtime.md`, README
+- [x] **P0.3 — Platform matrix:** v0.0.1 **supports Linux** as the primary capture target. WSL2 is a first-class secondary environment (Phase 5). Native Windows/macOS capture is out of scope for this version.
+- [x] **P0.4 — Data model sketch:** `Adapter`, `Flow`/`Observation`, `AppUsage`, `BandwidthSample` in `internal/domain`.
+- [x] **P0.5 — Storage contract:** in-memory only with bounds in `internal/store/memory`.
+- [x] **P0.6 — TUI contract:** Bubble Tea; dark theme default; panes for graph, app list, detail/status; mouse enable on startup; arrows/tab/enter/esc/q.
+- [x] **P0.7 — Non-goals freeze:** no firewall, DNS hijack, Portmaster client, Gin/React, system service, packet hex dump UI.
+- [x] **P0.8 — README obligation:** root `README.md` + `docs/runtime.md`.
 
-**Acceptance criteria:** a short `docs/runtime.md` (or README section) answers: how to start, what privileges, where data lives, how demo differs from live, and what is out of scope.
+**Acceptance criteria:** met — runtime docs answer start, privileges, data location, demo vs live, out of scope.
