@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -80,7 +81,8 @@ func NewModel(store *memory.Store, themeName string) Model {
 type tickMsg time.Time
 
 func tickCmd() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+	// ~5 Hz UI refresh for near real-time spike ranking.
+	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
@@ -220,7 +222,7 @@ func (m *Model) refresh() {
 		m.headerChips = chips
 	}
 
-	// Asymmetric EMA: moderate rise, slow fall — avoids spike→cliff look.
+	// Fast EMA for bars; ranking uses max(display, raw) so spikes jump to #1.
 	maxR := 0.0
 	for _, a := range raw {
 		r := a.RateInBps + a.RateOutBps
@@ -229,15 +231,16 @@ func (m *Model) refresh() {
 		if m.displayRates[a.Key] > maxR {
 			maxR = m.displayRates[a.Key]
 		}
+		if r > maxR {
+			maxR = r
+		}
 	}
 	m.smoothMaxRate = smoothRate(m.smoothMaxRate, maxR)
 	if m.smoothMaxRate < 1 {
 		m.smoothMaxRate = 1
 	}
-	// Smooth header totals independently.
 	m.smoothHdrRx = smoothRate(m.smoothHdrRx, m.status.TotalRxBps)
 	m.smoothHdrTx = smoothRate(m.smoothHdrTx, m.status.TotalTxBps)
-	// Smooth graph samples (copy + EMA last point into display ring).
 	m.samples = smoothSampleRing(m.smoothSamples, rawSamples)
 	m.smoothSamples = m.samples
 	live := make(map[string]struct{}, len(raw))
@@ -250,7 +253,21 @@ func (m *Model) refresh() {
 		}
 	}
 
+	// Re-rank for display: hottest first by max(smoothed bar rate, raw rate).
+	sort.SliceStable(raw, func(i, j int) bool {
+		ri := rankScore(raw[i], m.displayRates[raw[i].Key])
+		rj := rankScore(raw[j], m.displayRates[raw[j].Key])
+		if ri != rj {
+			return ri > rj
+		}
+		ti := raw[i].BytesIn + raw[i].BytesOut
+		tj := raw[j].BytesIn + raw[j].BytesOut
+		return ti > tj
+	})
 	m.apps = raw
+
+	// Follow selection by key only if user isn't watching the leaderboard reshuffle;
+	// still keep highlight on same app when it moves.
 	if m.selectedKey != "" {
 		found := false
 		for i, a := range m.apps {
@@ -273,6 +290,14 @@ func (m *Model) refresh() {
 		m.selectedKey = ""
 	}
 	m.loadFlows()
+}
+
+func rankScore(a domain.AppUsage, display float64) float64 {
+	raw := a.RateInBps + a.RateOutBps
+	if display > raw {
+		return display
+	}
+	return raw
 }
 
 func buildToggleNames(ads []domain.Adapter) []string {
@@ -301,75 +326,52 @@ func buildToggleNames(ads []domain.Adapter) []string {
 	return names
 }
 
-// smoothRate eases rates up moderately and down slowly (no cliff drops).
+// smoothRate: fast attack (spikes show immediately), moderate release (no cliff).
 func smoothRate(prev, next float64) float64 {
-	if prev <= 0 {
-		// ease into first reading instead of snapping
-		return next * 0.45
-	}
 	if next > prev {
-		// attack
-		out := 0.22*next + 0.78*prev
-		// cap rise per tick (~40% of previous, min floor)
-		cap := prev*1.4 + 256
-		if out > cap {
-			out = cap
+		// Snap toward spike — nearly real-time for the hot app.
+		if prev <= 0 {
+			return next
 		}
-		return out
+		return 0.72*next + 0.28*prev
 	}
-	// release — long tail
-	return 0.10*next + 0.90*prev
+	// Medium decay so ranking can reshuffle when traffic moves.
+	if prev <= 0 {
+		return next
+	}
+	return 0.35*next + 0.65*prev
 }
 
 func smoothSampleRing(prev, raw []domain.BandwidthSample) []domain.BandwidthSample {
 	if len(raw) == 0 {
-		// decay previous display samples slowly toward zero
 		if len(prev) == 0 {
 			return nil
 		}
 		out := make([]domain.BandwidthSample, len(prev))
 		for i, s := range prev {
 			out[i] = domain.BandwidthSample{
-				Time:     s.Time,
-				RxBps:    s.RxBps * 0.85,
-				TxBps:    s.TxBps * 0.85,
-				TotalBps: s.TotalBps * 0.85,
+				Time: s.Time, RxBps: s.RxBps * 0.7, TxBps: s.TxBps * 0.7, TotalBps: s.TotalBps * 0.7,
 			}
 		}
 		return out
 	}
 	out := make([]domain.BandwidthSample, len(raw))
 	for i, s := range raw {
-		if i < len(prev) {
-			// blend each aligned point lightly; last point more responsive
-			alpha := 0.25
-			if i == len(raw)-1 {
-				alpha = 0.30
+		var pr domain.BandwidthSample
+		if len(prev) > 0 {
+			pi := len(prev) - (len(raw) - i)
+			if pi >= 0 && pi < len(prev) {
+				pr = prev[pi]
 			}
-			pr := prev[i]
-			// if lengths differ, match by index from end
-			if len(prev) != len(raw) {
-				pi := len(prev) - (len(raw) - i)
-				if pi >= 0 && pi < len(prev) {
-					pr = prev[pi]
-				} else {
-					pr = domain.BandwidthSample{}
-				}
-			}
-			rx := alpha*s.RxBps + (1-alpha)*pr.RxBps
-			tx := alpha*s.TxBps + (1-alpha)*pr.TxBps
-			out[i] = domain.BandwidthSample{Time: s.Time, RxBps: rx, TxBps: tx, TotalBps: rx + tx}
-		} else {
-			out[i] = s
 		}
-	}
-	// extra ease on the newest sample against previous newest
-	if len(out) > 0 && len(prev) > 0 {
-		last := &out[len(out)-1]
-		pl := prev[len(prev)-1]
-		last.RxBps = smoothRate(pl.RxBps, last.RxBps)
-		last.TxBps = smoothRate(pl.TxBps, last.TxBps)
-		last.TotalBps = last.RxBps + last.TxBps
+		// Newest point tracks raw closely for live graph spikes.
+		alpha := 0.55
+		if i == len(raw)-1 {
+			alpha = 0.75
+		}
+		rx := alpha*s.RxBps + (1-alpha)*pr.RxBps
+		tx := alpha*s.TxBps + (1-alpha)*pr.TxBps
+		out[i] = domain.BandwidthSample{Time: s.Time, RxBps: rx, TxBps: tx, TotalBps: rx + tx}
 	}
 	return out
 }

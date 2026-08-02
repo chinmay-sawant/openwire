@@ -337,7 +337,8 @@ func sampleHostLoop(ctx context.Context, store *memory.Store, isWSL bool, mode d
 		store.SetAdapters(merged)
 	}
 
-	t := time.NewTicker(2 * time.Second)
+	// ~1 Hz host sampling so Windows spikes land in the list quickly.
+	t := time.NewTicker(1 * time.Second)
 	defer t.Stop()
 	for {
 		select {
@@ -349,9 +350,10 @@ func sampleHostLoop(ctx context.Context, store *memory.Store, isWSL bool, mode d
 				continue
 			}
 			adapters := store.ListAdapters()
-			merged, _ := wsl.MergeHostStatsIntoAdapters(adapters, stats, prev, 2.0)
+			merged, _ := wsl.MergeHostStatsIntoAdapters(adapters, stats, prev, 1.0)
 			store.SetAdapters(merged)
 
+			// Always refresh process list (short cache inside ListWindowsProcesses).
 			procs := wsl.ListWindowsProcesses(ctx)
 			obs, next := wsl.HostTrafficObservationsByProcess(now, stats, prev, procs)
 			prev = next

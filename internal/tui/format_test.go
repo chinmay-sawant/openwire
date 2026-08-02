@@ -36,16 +36,16 @@ func TestFormatAppLabel(t *testing.T) {
 	}
 }
 
-func TestSmoothRateNoCliff(t *testing.T) {
-	// large drop should not go to zero in one step
-	v := smoothRate(10_000, 0)
-	if v < 1000 {
-		t.Fatalf("decayed too fast: %v", v)
+func TestSmoothRateSnappyAttack(t *testing.T) {
+	// large rise should track closely (near real-time spikes)
+	v := smoothRate(100, 10_000)
+	if v < 5_000 {
+		t.Fatalf("attack too slow for spikes: %v", v)
 	}
-	// rise is capped
-	v2 := smoothRate(100, 1_000_000)
-	if v2 > 100*1.4+256+1 {
-		t.Fatalf("rise uncapped: %v", v2)
+	// drop should not cliff to zero in one step
+	v2 := smoothRate(10_000, 0)
+	if v2 < 1000 {
+		t.Fatalf("decayed too fast: %v", v2)
 	}
 }
 

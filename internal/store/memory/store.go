@@ -45,6 +45,8 @@ type appAgg struct {
 	// rate fields updated on sample ticks
 	rateInBps  float64
 	rateOutBps float64
+	// spikeScore tracks recent burst magnitude for top-of-list ranking.
+	spikeScore float64
 	prevIn     uint64
 	prevOut    uint64
 }
@@ -271,7 +273,8 @@ func (s *Store) maybeSampleLocked(now time.Time) {
 		return
 	}
 	elapsed := now.Sub(s.lastSampleAt)
-	if elapsed < time.Second {
+	// ~4 Hz rate updates so spikes show near real-time.
+	if elapsed < 250*time.Millisecond {
 		return
 	}
 	secs := elapsed.Seconds()
@@ -310,12 +313,38 @@ func (s *Store) maybeSampleLocked(now time.Time) {
 	s.txByIface = make(map[string]uint64)
 	s.lastSampleAt = now
 
-	// Per-app rates from byte deltas since last sample.
+	// Per-app rates: snap up on traffic, decay when idle so the hot app stays on top.
 	for _, agg := range s.apps {
 		din := agg.bytesIn - agg.prevIn
 		dout := agg.bytesOut - agg.prevOut
-		agg.rateInBps = float64(din) / secs
-		agg.rateOutBps = float64(dout) / secs
+		instIn := float64(din) / secs
+		instOut := float64(dout) / secs
+		if din+dout > 0 {
+			// Immediate rise — spike ranking is near real-time.
+			agg.rateInBps = instIn
+			agg.rateOutBps = instOut
+			burst := instIn + instOut
+			if burst > agg.spikeScore {
+				agg.spikeScore = burst
+			} else {
+				// keep spike score sticky briefly above instantaneous rate
+				agg.spikeScore = agg.spikeScore*0.75 + burst*0.25
+			}
+		} else {
+			// Idle: drop rate quickly so quiet apps fall down the list.
+			agg.rateInBps *= 0.45
+			agg.rateOutBps *= 0.45
+			agg.spikeScore *= 0.55
+			if agg.rateInBps < 1 {
+				agg.rateInBps = 0
+			}
+			if agg.rateOutBps < 1 {
+				agg.rateOutBps = 0
+			}
+			if agg.spikeScore < 1 {
+				agg.spikeScore = 0
+			}
+		}
 		agg.prevIn = agg.bytesIn
 		agg.prevOut = agg.bytesOut
 	}
@@ -331,6 +360,18 @@ func (s *Store) ListAppsByBandwidth(limit int) []domain.AppUsage {
 	}
 	out := make([]domain.AppUsage, 0, len(s.apps))
 	for k, agg := range s.apps {
+		// Expose ranking rate as max(instant, spike) so bursts surface at #1.
+		rin, rout := agg.rateInBps, agg.rateOutBps
+		if score := agg.spikeScore; score > rin+rout {
+			// Split spike score proportionally for display rates.
+			if rin+rout > 0 {
+				f := score / (rin + rout)
+				rin *= f
+				rout *= f
+			} else {
+				rin = score
+			}
+		}
 		out = append(out, domain.AppUsage{
 			Key:        k,
 			Name:       displayName(agg.name, agg.pid),
@@ -338,8 +379,8 @@ func (s *Store) ListAppsByBandwidth(limit int) []domain.AppUsage {
 			Path:       agg.path,
 			BytesIn:    agg.bytesIn,
 			BytesOut:   agg.bytesOut,
-			RateInBps:  agg.rateInBps,
-			RateOutBps: agg.rateOutBps,
+			RateInBps:  rin,
+			RateOutBps: rout,
 			Flows:      len(agg.flows),
 		})
 	}
@@ -387,16 +428,26 @@ func (s *Store) listAppsFilteredLocked(limit int, iface string) []domain.AppUsag
 	}
 	out := make([]domain.AppUsage, 0, len(byKey))
 	for k, a := range byKey {
-		// Use rates from global agg when available (same key).
+		// Use rates/spike from global agg when available (same key).
 		var rin, rout float64
 		if g, ok := s.apps[k]; ok {
-			// Scale global rate by share of bytes on this iface if possible.
 			total := g.bytesIn + g.bytesOut
 			local := a.bytesIn + a.bytesOut
+			share := 1.0
 			if total > 0 {
-				share := float64(local) / float64(total)
-				rin = g.rateInBps * share
-				rout = g.rateOutBps * share
+				share = float64(local) / float64(total)
+			}
+			rin = g.rateInBps * share
+			rout = g.rateOutBps * share
+			score := g.spikeScore * share
+			if score > rin+rout {
+				if rin+rout > 0 {
+					f := score / (rin + rout)
+					rin *= f
+					rout *= f
+				} else {
+					rin = score
+				}
 			}
 		}
 		out = append(out, domain.AppUsage{
@@ -430,15 +481,20 @@ func displayName(name string, pid int) string {
 }
 
 func sortLimitApps(out []domain.AppUsage, limit int) []domain.AppUsage {
-	sort.Slice(out, func(i, j int) bool {
+	sort.SliceStable(out, func(i, j int) bool {
 		ri := out[i].RateInBps + out[i].RateOutBps
 		rj := out[j].RateInBps + out[j].RateOutBps
+		// Primary: current rate / spike (hottest first).
 		if ri != rj {
 			return ri > rj
 		}
+		// Tie-break: recent session volume, then name for stability.
 		ti := out[i].BytesIn + out[i].BytesOut
 		tj := out[j].BytesIn + out[j].BytesOut
-		return ti > tj
+		if ti != tj {
+			return ti > tj
+		}
+		return out[i].Name < out[j].Name
 	})
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
