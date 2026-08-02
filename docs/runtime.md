@@ -3,6 +3,7 @@
 ## How to start
 
 ```bash
+openwire adapters                # list Linux (+ Windows host on WSL2) adapters; no TUI
 openwire start                   # packet capture if privileged, else /proc stats mode
 openwire start --strict-capture  # require AF_PACKET; error if no CAP_NET_RAW
 openwire start --demo            # synthetic traffic; no privileges

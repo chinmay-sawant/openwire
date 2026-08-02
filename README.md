@@ -17,6 +17,9 @@ No libpcap/CGO: live capture uses pure-Go **AF_PACKET**.
 # Build
 make build
 
+# List adapters (Linux + Windows host under WSL2) — no TUI
+./bin/openwire adapters
+
 # Demo UI — synthetic traffic
 ./bin/openwire start --demo
 

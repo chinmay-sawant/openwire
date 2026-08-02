@@ -76,7 +76,21 @@ func main() {
 	start.Flags().BoolVar(&deep, "deep", false, "prefer conntrack deep attribution when AF_PACKET is unavailable")
 	start.Flags().BoolVar(&ebpf, "ebpf", false, "enable best-effort eBPF kprobe counters (needs CAP_BPF/root + tracefs)")
 
-	root.AddCommand(start)
+	adapters := &cobra.Command{
+		Use:   "adapters",
+		Short: "List Linux and Windows host network adapters (no TUI)",
+		Long: `Print a table of local network adapters without starting the monitor UI.
+
+On WSL2 this includes Windows host adapters (via PowerShell/ipconfig when available)
+with cumulative RX/TX byte counters when Get-NetAdapterStatistics works.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := app.AdaptersContext(cmd.Context())
+			defer cancel()
+			return app.PrintAdapters(ctx, app.AdaptersOptions{Out: cmd.OutOrStdout()})
+		},
+	}
+
+	root.AddCommand(start, adapters)
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "openwire:", err)
