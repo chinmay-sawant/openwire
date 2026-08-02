@@ -39,9 +39,9 @@ func (d *DemoEngine) Start(ctx context.Context, ifaces []string) (<-chan domain.
 	if rng == nil {
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
-	iface := "eth0"
+	demoIfaces := []string{"eth0", "wlan0"}
 	if len(ifaces) > 0 {
-		iface = ifaces[0]
+		demoIfaces = ifaces
 	}
 
 	obs := make(chan domain.Observation, 256)
@@ -64,6 +64,7 @@ func (d *DemoEngine) Start(ctx context.Context, ifaces []string) (<-chan domain.
 					if rng.Intn(2) == 0 {
 						dir = domain.DirectionTx
 					}
+					iface := demoIfaces[rng.Intn(len(demoIfaces))]
 					o := domain.Observation{
 						Time:      now,
 						Iface:     iface,
@@ -118,6 +119,14 @@ func DemoAdapters() []domain.Adapter {
 			Index:    2,
 			Hardware: "00:11:22:33:44:55",
 			IPv4:     []string{"10.0.0.2"},
+			Up:       true,
+			Source:   domain.AdapterSourceDemo,
+		},
+		{
+			Name:     "wlan0",
+			Index:    3,
+			Hardware: "00:11:22:33:44:66",
+			IPv4:     []string{"192.168.1.10"},
 			Up:       true,
 			Source:   domain.AdapterSourceDemo,
 		},

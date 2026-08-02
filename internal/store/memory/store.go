@@ -3,6 +3,7 @@ package memory
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,21 +64,78 @@ type Store struct {
 	adapters []domain.Adapter
 	status   domain.Status
 
-	// sampling for graph
+	// filterIface filters queries: "" = all adapters.
+	filterIface string
+
+	// sampling for graph (all + per-iface)
 	rxSinceSample uint64
 	txSinceSample uint64
 	lastSampleAt  time.Time
+	rxByIface     map[string]uint64
+	txByIface     map[string]uint64
+	samplesByIface map[string][]domain.BandwidthSample
 }
 
 // New creates a Store with the given bounds.
 func New(cfg Config) *Store {
 	cfg = cfg.withDefaults()
 	return &Store{
-		cfg:    cfg,
-		flows:  make(map[string]*flowRec),
-		apps:   make(map[string]*appAgg),
-		status: domain.Status{Running: false},
+		cfg:            cfg,
+		flows:          make(map[string]*flowRec),
+		apps:           make(map[string]*appAgg),
+		status:         domain.Status{Running: false},
+		rxByIface:      make(map[string]uint64),
+		txByIface:      make(map[string]uint64),
+		samplesByIface: make(map[string][]domain.BandwidthSample),
 	}
+}
+
+// SetIfaceFilter sets the active adapter filter ("" = all).
+func (s *Store) SetIfaceFilter(iface string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.filterIface = iface
+}
+
+// IfaceFilter returns the current adapter filter ("" = all).
+func (s *Store) IfaceFilter() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.filterIface
+}
+
+// CycleIfaceFilter cycles: all → first capture iface → … → all.
+// names should be the toggle list shown in the UI.
+func (s *Store) CycleIfaceFilter(names []string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(names) == 0 {
+		s.filterIface = ""
+		return ""
+	}
+	if s.filterIface == "" {
+		s.filterIface = names[0]
+		return s.filterIface
+	}
+	for i, n := range names {
+		if n == s.filterIface {
+			if i+1 < len(names) {
+				s.filterIface = names[i+1]
+			} else {
+				s.filterIface = ""
+			}
+			return s.filterIface
+		}
+	}
+	s.filterIface = ""
+	return ""
+}
+
+// SetIfaceFilterExact sets filter if name is known or empty for all.
+func (s *Store) SetIfaceFilterExact(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.filterIface = name
 }
 
 // SetStatus replaces the runtime status fields (mode, privilege, message, …).
@@ -147,9 +205,13 @@ func (s *Store) Ingest(o domain.Observation) {
 	s.status.TotalTxBytes += out
 	s.rxSinceSample += in
 	s.txSinceSample += out
+	if o.Iface != "" {
+		s.rxByIface[o.Iface] += in
+		s.txByIface[o.Iface] += out
+	}
 
 	appKey, appName, pid := appIdentity(o, rec)
-	if appName != "" {
+	if appName != "" && appName != "unknown" {
 		rec.flow.AppName = appName
 	}
 	if pid > 0 {
@@ -170,7 +232,7 @@ func (s *Store) Ingest(o domain.Observation) {
 	agg.bytesIn += in
 	agg.bytesOut += out
 	agg.flows[key] = struct{}{}
-	if agg.name == "" || agg.name == "unknown" {
+	if betterName(appName, agg.name) {
 		agg.name = appName
 	}
 	if pid > 0 {
@@ -180,6 +242,20 @@ func (s *Store) Ingest(o domain.Observation) {
 	s.maybeSampleLocked(o.Time)
 	s.status.AppCount = len(s.apps)
 	s.status.FlowCount = len(s.flows)
+}
+
+func betterName(newName, oldName string) bool {
+	if newName == "" || newName == "unknown" {
+		return false
+	}
+	if oldName == "" || oldName == "unknown" || strings.HasPrefix(oldName, "pid:") {
+		return true
+	}
+	// Prefer win/ process names over aggregate windows-host.
+	if oldName == "windows-host" && newName != "windows-host" {
+		return true
+	}
+	return false
 }
 
 // TickSample forces a graph sample using elapsed wall time (for quiet periods).
@@ -215,8 +291,23 @@ func (s *Store) maybeSampleLocked(now time.Time) {
 	}
 	s.status.TotalRxBps = rx
 	s.status.TotalTxBps = tx
+	// Per-iface samples for adapter toggle graph.
+	for iface, rxi := range s.rxByIface {
+		txi := s.txByIface[iface]
+		rRate := float64(rxi) / secs
+		tRate := float64(txi) / secs
+		ring := append(s.samplesByIface[iface], domain.BandwidthSample{
+			Time: now, RxBps: rRate, TxBps: tRate, TotalBps: rRate + tRate,
+		})
+		if len(ring) > s.cfg.MaxSamples {
+			ring = append([]domain.BandwidthSample(nil), ring[len(ring)-s.cfg.MaxSamples:]...)
+		}
+		s.samplesByIface[iface] = ring
+	}
 	s.rxSinceSample = 0
 	s.txSinceSample = 0
+	s.rxByIface = make(map[string]uint64)
+	s.txByIface = make(map[string]uint64)
 	s.lastSampleAt = now
 
 	// Per-app rates from byte deltas since last sample.
@@ -231,14 +322,18 @@ func (s *Store) maybeSampleLocked(now time.Time) {
 }
 
 // ListAppsByBandwidth returns top apps by current rate then total bytes.
+// When an iface filter is set, apps are rebuilt from flows on that iface only.
 func (s *Store) ListAppsByBandwidth(limit int) []domain.AppUsage {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.filterIface != "" {
+		return s.listAppsFilteredLocked(limit, s.filterIface)
+	}
 	out := make([]domain.AppUsage, 0, len(s.apps))
 	for k, agg := range s.apps {
 		out = append(out, domain.AppUsage{
 			Key:        k,
-			Name:       agg.name,
+			Name:       displayName(agg.name, agg.pid),
 			PID:        agg.pid,
 			Path:       agg.path,
 			BytesIn:    agg.bytesIn,
@@ -248,6 +343,93 @@ func (s *Store) ListAppsByBandwidth(limit int) []domain.AppUsage {
 			Flows:      len(agg.flows),
 		})
 	}
+	return sortLimitApps(out, limit)
+}
+
+func (s *Store) listAppsFilteredLocked(limit int, iface string) []domain.AppUsage {
+	type acc struct {
+		name     string
+		pid      int
+		path     string
+		bytesIn  uint64
+		bytesOut uint64
+		flows    int
+	}
+	byKey := map[string]*acc{}
+	for _, rec := range s.flows {
+		if !ifaceMatch(rec.flow.Key.Iface, iface) {
+			continue
+		}
+		name := rec.flow.AppName
+		pid := rec.flow.PID
+		if name == "" {
+			name = "unknown"
+		}
+		key := name
+		if pid > 0 {
+			key = name + "#" + itoa(pid)
+		}
+		a, ok := byKey[key]
+		if !ok {
+			a = &acc{name: name, pid: pid}
+			// path from global app map if present
+			if g, ok := s.apps[key]; ok {
+				a.path = g.path
+				if betterName(g.name, a.name) {
+					a.name = g.name
+				}
+			}
+			byKey[key] = a
+		}
+		a.bytesIn += rec.flow.BytesIn
+		a.bytesOut += rec.flow.BytesOut
+		a.flows++
+	}
+	out := make([]domain.AppUsage, 0, len(byKey))
+	for k, a := range byKey {
+		// Use rates from global agg when available (same key).
+		var rin, rout float64
+		if g, ok := s.apps[k]; ok {
+			// Scale global rate by share of bytes on this iface if possible.
+			total := g.bytesIn + g.bytesOut
+			local := a.bytesIn + a.bytesOut
+			if total > 0 {
+				share := float64(local) / float64(total)
+				rin = g.rateInBps * share
+				rout = g.rateOutBps * share
+			}
+		}
+		out = append(out, domain.AppUsage{
+			Key: k, Name: displayName(a.name, a.pid), PID: a.pid, Path: a.path,
+			BytesIn: a.bytesIn, BytesOut: a.bytesOut,
+			RateInBps: rin, RateOutBps: rout, Flows: a.flows,
+		})
+	}
+	return sortLimitApps(out, limit)
+}
+
+func ifaceMatch(flowIface, filter string) bool {
+	if filter == "" {
+		return true
+	}
+	if flowIface == filter {
+		return true
+	}
+	// win:Wi-Fi filter matches observations tagged win:Wi-Fi
+	return false
+}
+
+func displayName(name string, pid int) string {
+	if name == "" || name == "unknown" {
+		if pid > 0 {
+			return "pid:" + itoa(pid)
+		}
+		return "unknown"
+	}
+	return name
+}
+
+func sortLimitApps(out []domain.AppUsage, limit int) []domain.AppUsage {
 	sort.Slice(out, func(i, j int) bool {
 		ri := out[i].RateInBps + out[i].RateOutBps
 		rj := out[j].RateInBps + out[j].RateOutBps
@@ -264,10 +446,16 @@ func (s *Store) ListAppsByBandwidth(limit int) []domain.AppUsage {
 	return out
 }
 
-// Samples returns a copy of the bandwidth ring.
+// Samples returns the bandwidth ring for the active filter (or all).
 func (s *Store) Samples() []domain.BandwidthSample {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.filterIface != "" {
+		if ring, ok := s.samplesByIface[s.filterIface]; ok {
+			return append([]domain.BandwidthSample(nil), ring...)
+		}
+		return nil
+	}
 	return append([]domain.BandwidthSample(nil), s.samples...)
 }
 
@@ -278,19 +466,49 @@ func (s *Store) ListAdapters() []domain.Adapter {
 	return append([]domain.Adapter(nil), s.adapters...)
 }
 
-// ListFlowsForApp returns recent flows for an app key.
+// ListFlowsForApp returns recent flows for an app key (honors iface filter).
 func (s *Store) ListFlowsForApp(appKey string, limit int) []domain.Flow {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	agg, ok := s.apps[appKey]
 	if !ok {
-		return nil
+		// Filtered rebuild may not have global app entry; scan flows.
+		return s.listFlowsByAppKeyLocked(appKey, limit)
 	}
 	flows := make([]domain.Flow, 0, len(agg.flows))
 	for fk := range agg.flows {
 		if rec, ok := s.flows[fk]; ok {
+			if s.filterIface != "" && !ifaceMatch(rec.flow.Key.Iface, s.filterIface) {
+				continue
+			}
 			flows = append(flows, rec.flow)
 		}
+	}
+	sort.Slice(flows, func(i, j int) bool {
+		return flows[i].BytesIn+flows[i].BytesOut > flows[j].BytesIn+flows[j].BytesOut
+	})
+	if limit > 0 && len(flows) > limit {
+		flows = flows[:limit]
+	}
+	return flows
+}
+
+func (s *Store) listFlowsByAppKeyLocked(appKey string, limit int) []domain.Flow {
+	var flows []domain.Flow
+	for _, rec := range s.flows {
+		if s.filterIface != "" && !ifaceMatch(rec.flow.Key.Iface, s.filterIface) {
+			continue
+		}
+		name := rec.flow.AppName
+		pid := rec.flow.PID
+		key := name
+		if pid > 0 {
+			key = name + "#" + itoa(pid)
+		}
+		if key != appKey && name != appKey {
+			continue
+		}
+		flows = append(flows, rec.flow)
 	}
 	sort.Slice(flows, func(i, j int) bool {
 		return flows[i].BytesIn+flows[i].BytesOut > flows[j].BytesIn+flows[j].BytesOut
@@ -438,29 +656,30 @@ func splitDirection(o domain.Observation) (in, out uint64) {
 }
 
 func appIdentity(o domain.Observation, rec *flowRec) (key, name string, pid int) {
-	if o.AppHint != "" {
-		name = o.AppHint
-	} else if rec.flow.AppName != "" {
-		name = rec.flow.AppName
-	} else {
-		name = "unknown"
-	}
 	if o.PIDHint > 0 {
 		pid = o.PIDHint
 	} else {
 		pid = rec.flow.PID
 	}
-	if name != "unknown" {
-		key = name
-		if pid > 0 {
-			key = name + "#" + itoa(pid)
-		}
-		return key, name, pid
+	switch {
+	case o.AppHint != "" && o.AppHint != "unknown":
+		name = o.AppHint
+	case rec.flow.AppName != "" && rec.flow.AppName != "unknown":
+		name = rec.flow.AppName
+	case pid > 0:
+		name = "pid:" + itoa(pid)
+	default:
+		name = "unknown"
 	}
-	if pid > 0 {
-		return "pid:" + itoa(pid), "pid:" + itoa(pid), pid
+	// Never key aggregate as bare unknown when we have a pid.
+	if name == "unknown" && pid > 0 {
+		name = "pid:" + itoa(pid)
 	}
-	return "unknown", "unknown", 0
+	key = name
+	if pid > 0 && !strings.Contains(name, "#") {
+		key = name + "#" + itoa(pid)
+	}
+	return key, name, pid
 }
 
 func itoa(n int) string {

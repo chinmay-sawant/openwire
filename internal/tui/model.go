@@ -12,14 +12,21 @@ import (
 	"github.com/chinmay-sawant/openwire/internal/store/memory"
 )
 
-// pane identifiers for tab navigation.
 type pane int
 
 const (
-	paneGraph pane = iota
+	paneHeader pane = iota
+	paneGraph
 	paneApps
 	paneDetail
 )
+
+type chip struct {
+	label string // display
+	id    string // filter id: "" for all, or iface name
+	x0    int
+	x1    int
+}
 
 // Model is the Bubble Tea root model for OpenWire.
 type Model struct {
@@ -28,10 +35,10 @@ type Model struct {
 	width  int
 	height int
 
-	focus        pane
-	selected     int
-	selectedKey  string // stable selection across re-sorts
-	showDetail   bool
+	focus       pane
+	selected    int
+	selectedKey string
+	showDetail  bool
 
 	apps     []domain.AppUsage
 	samples  []domain.BandwidthSample
@@ -39,47 +46,44 @@ type Model struct {
 	status   domain.Status
 	flows    []domain.Flow
 
-	// display smoothing — reduces bar/rate thrash
+	filterIface   string
+	toggleNames   []string // cycle order for [ and ]
+	headerChips   []chip
 	smoothMaxRate float64
-	displayRates  map[string]float64 // app key -> EMA of rate
+	displayRates  map[string]float64
 
-	// fixed layout slots (set on resize / each view from height)
+	headerH int
 	graphH  int
 	appsH   int
 	detailH int
 
-	// last frame cache for flicker reduction when nothing meaningful changed
-	lastView   string
-	frameSeq   uint64
-	ready      bool
+	ready bool
 }
 
 // NewModel constructs the TUI model bound to a store.
 func NewModel(store *memory.Store, themeName string) Model {
 	_ = themeName
-	return Model{
+	m := Model{
 		store:        store,
 		theme:        DarkTheme(),
 		focus:        paneApps,
 		displayRates: make(map[string]float64),
+		headerH:      2,
+		graphH:       3,
 	}
+	return m
 }
 
 type tickMsg time.Time
 
 func tickCmd() tea.Cmd {
-	// ~2 Hz is enough for bandwidth UI and reduces full-frame redraws.
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
-// Init implements tea.Model.
-func (m Model) Init() tea.Cmd {
-	return tickCmd()
-}
+func (m Model) Init() tea.Cmd { return tickCmd() }
 
-// Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -87,7 +91,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.ready = true
 		m.recomputeLayout()
-		m.lastView = "" // force redraw
 		return m, nil
 
 	case tickMsg:
@@ -99,49 +102,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "tab":
-			m.focus = (m.focus + 1) % 3
-			m.lastView = ""
+			m.focus = (m.focus + 1) % 4
 			return m, nil
 		case "shift+tab":
-			m.focus = (m.focus + 2) % 3
-			m.lastView = ""
+			m.focus = (m.focus + 3) % 4
+			return m, nil
+		case "[", "h", "left":
+			m.cycleFilter(-1)
+			return m, nil
+		case "]", "l", "right":
+			m.cycleFilter(1)
+			return m, nil
+		case "a":
+			m.setFilter("")
 			return m, nil
 		case "up", "k":
-			if m.focus == paneApps || m.focus == paneDetail {
+			if m.focus == paneApps || m.focus == paneDetail || m.focus == paneHeader {
 				if m.selected > 0 {
 					m.selected--
 					m.syncSelectedKey()
 					m.loadFlows()
-					m.lastView = ""
 				}
 			}
 			return m, nil
 		case "down", "j":
-			if m.focus == paneApps || m.focus == paneDetail {
+			if m.focus == paneApps || m.focus == paneDetail || m.focus == paneHeader {
 				if m.selected < len(m.apps)-1 {
 					m.selected++
 					m.syncSelectedKey()
 					m.loadFlows()
-					m.lastView = ""
 				}
 			}
 			return m, nil
 		case "enter":
+			if m.focus == paneHeader && len(m.toggleNames) > 0 {
+				// enter on header cycles filter
+				m.cycleFilter(1)
+				return m, nil
+			}
 			m.showDetail = true
 			m.focus = paneDetail
 			m.loadFlows()
-			m.lastView = ""
 			return m, nil
 		case "esc":
 			m.showDetail = false
 			m.focus = paneApps
-			m.lastView = ""
 			return m, nil
 		case "home":
 			m.selected = 0
 			m.syncSelectedKey()
 			m.loadFlows()
-			m.lastView = ""
 			return m, nil
 		case "end":
 			if len(m.apps) > 0 {
@@ -149,32 +159,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.syncSelectedKey()
 			m.loadFlows()
-			m.lastView = ""
 			return m, nil
 		}
 
 	case tea.MouseMsg:
-		switch msg.Action {
-		case tea.MouseActionPress:
-			if msg.Button == tea.MouseButtonLeft {
-				m.handleClick(msg.X, msg.Y)
-				m.lastView = ""
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			m.handleClick(msg.X, msg.Y)
+		}
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp {
+			if m.selected > 0 {
+				m.selected--
+				m.syncSelectedKey()
+				m.loadFlows()
 			}
-			if msg.Button == tea.MouseButtonWheelUp {
-				if m.selected > 0 {
-					m.selected--
-					m.syncSelectedKey()
-					m.loadFlows()
-					m.lastView = ""
-				}
-			}
-			if msg.Button == tea.MouseButtonWheelDown {
-				if m.selected < len(m.apps)-1 {
-					m.selected++
-					m.syncSelectedKey()
-					m.loadFlows()
-					m.lastView = ""
-				}
+		}
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown {
+			if m.selected < len(m.apps)-1 {
+				m.selected++
+				m.syncSelectedKey()
+				m.loadFlows()
 			}
 		}
 		return m, nil
@@ -183,12 +186,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) recomputeLayout() {
-	// Fixed pane heights from terminal size — never depend on content length.
-	helpH := 1
-	headerH := 1
-	m.graphH = max(6, m.height/5)
-	m.detailH = max(5, m.height/6)
-	m.appsH = m.height - headerH - m.graphH - m.detailH - helpH
+	// Compact graph (no wasted blank band); give room to apps.
+	m.headerH = 2
+	m.graphH = 3 // 1 border-less compact block: title+chart | rates
+	m.detailH = max(4, m.height/7)
+	m.appsH = m.height - m.headerH - m.graphH - m.detailH - 1 // help
 	if m.appsH < 6 {
 		m.appsH = 6
 	}
@@ -199,12 +201,14 @@ func (m *Model) refresh() {
 		return
 	}
 	m.store.TickSample(time.Now())
-	raw := m.store.ListAppsByBandwidth(50)
+	m.filterIface = m.store.IfaceFilter()
+	raw := m.store.ListAppsByBandwidth(80)
 	m.samples = m.store.Samples()
 	m.adapters = m.store.ListAdapters()
 	m.status = m.store.Snapshot()
+	m.toggleNames = buildToggleNames(m.adapters)
+	m.rebuildHeaderChips()
 
-	// EMA-smooth per-app rates so bars don't thrash every tick.
 	const alpha = 0.35
 	maxR := 0.0
 	for _, a := range raw {
@@ -220,7 +224,6 @@ func (m *Model) refresh() {
 			maxR = prev
 		}
 	}
-	// Smooth global max for bar scale (prevents full-width flash on spikes).
 	if m.smoothMaxRate <= 0 {
 		m.smoothMaxRate = maxR
 	} else {
@@ -229,7 +232,6 @@ func (m *Model) refresh() {
 	if m.smoothMaxRate < 1 {
 		m.smoothMaxRate = 1
 	}
-	// Drop stale EMA keys.
 	live := make(map[string]struct{}, len(raw))
 	for _, a := range raw {
 		live[a.Key] = struct{}{}
@@ -241,7 +243,6 @@ func (m *Model) refresh() {
 	}
 
 	m.apps = raw
-	// Restore selection by key so re-sorting doesn't jump the highlight.
 	if m.selectedKey != "" {
 		found := false
 		for i, a := range m.apps {
@@ -252,15 +253,11 @@ func (m *Model) refresh() {
 			}
 		}
 		if !found {
-			if m.selected >= len(m.apps) {
-				m.selected = max(0, len(m.apps)-1)
-			}
+			m.selected = max(0, len(m.apps)-1)
 			m.syncSelectedKey()
 		}
-	} else {
-		if m.selected >= len(m.apps) {
-			m.selected = max(0, len(m.apps)-1)
-		}
+	} else if m.selected >= len(m.apps) {
+		m.selected = max(0, len(m.apps)-1)
 		m.syncSelectedKey()
 	}
 	if len(m.apps) == 0 {
@@ -268,7 +265,72 @@ func (m *Model) refresh() {
 		m.selectedKey = ""
 	}
 	m.loadFlows()
-	m.frameSeq++
+}
+
+func buildToggleNames(ads []domain.Adapter) []string {
+	var names []string
+	seen := map[string]struct{}{}
+	for _, a := range ads {
+		if a.Source == domain.AdapterSourceWindowsHost {
+			id := "win:" + a.Name
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			// Prefer up adapters first later — collect all
+			names = append(names, id)
+			seen[id] = struct{}{}
+			continue
+		}
+		if a.Loopback {
+			continue
+		}
+		if _, ok := seen[a.Name]; ok {
+			continue
+		}
+		names = append(names, a.Name)
+		seen[a.Name] = struct{}{}
+	}
+	return names
+}
+
+func (m *Model) rebuildHeaderChips() {
+	// Built during render with real x positions; placeholder ids here.
+	m.headerChips = nil
+}
+
+func (m *Model) cycleFilter(dir int) {
+	if m.store == nil {
+		return
+	}
+	// Order: all ("") then each capture/host adapter.
+	names := make([]string, 0, len(m.toggleNames)+1)
+	names = append(names, "")
+	names = append(names, m.toggleNames...)
+	if len(names) == 1 {
+		return
+	}
+	cur := m.store.IfaceFilter()
+	idx := 0
+	for i, n := range names {
+		if n == cur {
+			idx = i
+			break
+		}
+	}
+	n := len(names)
+	idx = (idx + dir%n + n) % n
+	m.store.SetIfaceFilterExact(names[idx])
+	m.filterIface = m.store.IfaceFilter()
+	m.refresh()
+}
+
+func (m *Model) setFilter(id string) {
+	if m.store == nil {
+		return
+	}
+	m.store.SetIfaceFilterExact(id)
+	m.filterIface = id
+	m.refresh()
 }
 
 func (m *Model) syncSelectedKey() {
@@ -289,17 +351,27 @@ func (m *Model) handleClick(x, y int) {
 	if m.height < 10 {
 		return
 	}
-	// Regions match fixed layout: header(1) + graph + apps + detail + help
-	graphEnd := 1 + m.graphH
+	// Header rows 0..headerH-1 are clickable chips + title.
+	if y < m.headerH {
+		m.focus = paneHeader
+		// Match chip hitboxes from last render.
+		for _, c := range m.headerChips {
+			if x >= c.x0 && x < c.x1 {
+				m.setFilter(c.id)
+				return
+			}
+		}
+		return
+	}
+	graphEnd := m.headerH + m.graphH
 	appsEnd := graphEnd + m.appsH
 	switch {
-	case y <= graphEnd:
+	case y < graphEnd:
 		m.focus = paneGraph
 	case y < appsEnd:
 		m.focus = paneApps
-		// Border takes 1 row; title 1 row inside pane.
-		innerTop := graphEnd + 1 // after top border of apps pane
-		row := y - innerTop - 1  // skip title line
+		innerTop := graphEnd + 1
+		row := y - innerTop - 1
 		if row >= 0 && row < len(m.apps) {
 			m.selected = row
 			m.syncSelectedKey()
@@ -309,7 +381,6 @@ func (m *Model) handleClick(x, y int) {
 		m.focus = paneDetail
 		m.showDetail = true
 	}
-	_ = x
 }
 
 // View implements tea.Model.
@@ -322,40 +393,38 @@ func (m Model) View() string {
 			"terminal too small (%dx%d). need at least 60x16", m.width, m.height,
 		))
 	}
-	if m.graphH == 0 {
+	if m.appsH == 0 {
 		m.recomputeLayout()
 	}
 
 	w := m.width
-	// Build fixed-height panes so JoinVertical never reflows when data changes.
-	header := fitLine(m.renderHeader(), w)
-	graphBody := m.renderGraphBody(max(1, m.graphH-2), max(1, w-4))
+	header := m.renderHeaderFull(w)
+	// Compact graph: no heavy empty border padding — single thin bordered strip.
+	graphInner := m.renderGraphCompact(w - 2)
+	graph := m.theme.Border.Width(w - 2).Render(graphInner)
+	// Ensure graph block is exactly graphH lines.
+	graph = padBlock(graph, w, m.graphH)
+
 	appsBody := m.renderAppsBody(max(1, m.appsH-2), max(1, w-4))
 	detailBody := m.renderDetailBody(max(1, m.detailH-2), max(1, w-4))
-	help := fitLine(m.theme.Help.Render("↑↓/mouse select · tab panes · enter detail · esc back · q quit · theme: dark"), w)
+	apps := padBlock(m.theme.Border.Width(w-2).Height(m.appsH-2).Render(appsBody), w, m.appsH)
+	detail := padBlock(m.theme.Border.Width(w-2).Height(m.detailH-2).Render(detailBody), w, m.detailH)
 
-	graph := m.theme.Border.Width(w - 2).Height(m.graphH - 2).Render(graphBody)
-	apps := m.theme.Border.Width(w - 2).Height(m.appsH - 2).Render(appsBody)
-	detail := m.theme.Border.Width(w - 2).Height(m.detailH - 2).Render(detailBody)
+	help := fitLine(m.theme.Help.Render(
+		"click adapters · [ ] cycle · a=all · ↑↓ apps · tab panes · enter detail · q quit",
+	), w)
 
-	// Force each section to exact visual height with pad/truncate.
-	out := strings.Join([]string{
-		padBlock(header, w, 1),
-		padBlock(graph, w, m.graphH),
-		padBlock(apps, w, m.appsH),
-		padBlock(detail, w, m.detailH),
+	return strings.Join([]string{
+		header,
+		graph,
+		apps,
+		detail,
 		padBlock(help, w, 1),
 	}, "\n")
-
-	m.lastView = out
-	return out
 }
 
-func (m Model) renderHeader() string {
+func (m *Model) renderHeaderFull(w int) string {
 	state := "idle"
-	if m.status.Running {
-		state = "live"
-	}
 	switch m.status.Mode {
 	case domain.ModeDemo:
 		state = "demo"
@@ -363,85 +432,113 @@ func (m Model) renderHeader() string {
 		state = "stats"
 	case domain.ModeLive:
 		state = "live"
-	}
-	// Prefer a short, stable adapter summary (primary up iface + win count).
-	adapterStr := summarizeAdapters(m.adapters)
-	title := m.theme.Title.Render(" OpenWire ")
-	meta := m.theme.Status.Render(fmt.Sprintf(" %s · %s · ↑%-10s ↓%-10s ",
-		state, adapterStr,
-		humanRate(m.status.TotalTxBps),
-		humanRate(m.status.TotalRxBps),
-	))
-	if m.status.Message != "" {
-		// Truncate long messages so header width stays stable.
-		msg := m.status.Message
-		if utf8.RuneCountInString(msg) > 36 {
-			msg = truncate(msg, 36)
+	default:
+		if m.status.Running {
+			state = "live"
 		}
-		meta += m.theme.Warn.Render(" " + msg + " ")
 	}
+
+	// Row 1: full-width bar with title + mode + rates.
+	left := m.theme.Title.Render(" OpenWire ")
+	mid := m.theme.Status.Render(fmt.Sprintf(" %s ", state))
 	if m.status.IsWSL2 {
-		meta += m.theme.Muted.Render(" WSL2 ")
+		mid += m.theme.Muted.Render(" WSL2 ")
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, title, meta)
+	rates := m.theme.Status.Render(fmt.Sprintf(" ↑%-9s ↓%-9s ",
+		humanRate(m.status.TotalTxBps), humanRate(m.status.TotalRxBps)))
+	row1Content := lipgloss.JoinHorizontal(lipgloss.Top, left, mid, rates)
+	// Stretch to full width with background.
+	row1 := m.theme.HeaderBar.Width(w).Render(padToWidth(row1Content, w))
+
+	// Row 2: clickable adapter chips spanning full width.
+	row2, chips := m.renderAdapterChips(w)
+	m.headerChips = chips
+	row2 = m.theme.HeaderBar.Width(w).Render(padToWidth(row2, w))
+
+	return row1 + "\n" + row2
 }
 
-func summarizeAdapters(ads []domain.Adapter) string {
-	if len(ads) == 0 {
-		return "no adapters"
+func (m Model) renderAdapterChips(w int) (string, []chip) {
+	active := m.theme.ChipOn
+	idle := m.theme.ChipOff
+	if m.focus == paneHeader {
+		// slight emphasis when header focused
+		idle = idle.Bold(true)
 	}
-	var linuxUp []string
-	winN := 0
-	for _, a := range ads {
-		if a.Source == domain.AdapterSourceWindowsHost {
-			if a.Up {
-				winN++
-			}
-			continue
+
+	var chips []chip
+	var parts []string
+	x := 1 // leading space
+
+	add := func(id, label string) {
+		lab := " " + label + " "
+		style := idle
+		if id == m.filterIface {
+			style = active
 		}
-		if a.Up && !a.Loopback {
-			linuxUp = append(linuxUp, a.Name)
-		}
+		rendered := style.Render(lab)
+		width := lipgloss.Width(rendered)
+		chips = append(chips, chip{label: label, id: id, x0: x, x1: x + width})
+		parts = append(parts, rendered)
+		x += width + 1 // gap
 	}
-	parts := make([]string, 0, 3)
-	if len(linuxUp) > 0 {
-		// show at most 2 linux ifaces
-		if len(linuxUp) > 2 {
-			parts = append(parts, strings.Join(linuxUp[:2], ",")+"+")
+
+	add("", "all")
+	for _, name := range m.toggleNames {
+		label := name
+		if strings.HasPrefix(name, "win:") {
+			label = "win:" + shortName(strings.TrimPrefix(name, "win:"), 14)
 		} else {
-			parts = append(parts, strings.Join(linuxUp, ","))
+			label = shortName(name, 12)
+		}
+		add(name, label)
+		if x > w-8 {
+			break
 		}
 	}
-	if winN > 0 {
-		parts = append(parts, fmt.Sprintf("win×%d", winN))
-	}
-	if len(parts) == 0 {
-		return ads[0].Name
-	}
-	return strings.Join(parts, " · ")
+	hint := m.theme.Muted.Render("  [ ] cycle")
+	parts = append(parts, hint)
+	return " " + strings.Join(parts, " "), chips
 }
 
-func (m Model) renderGraphBody(rows, cols int) string {
-	focusMark := " "
+func shortName(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
+}
+
+func padToWidth(s string, w int) string {
+	pw := lipgloss.Width(s)
+	if pw >= w {
+		return lipgloss.NewStyle().MaxWidth(w).Render(s)
+	}
+	return s + strings.Repeat(" ", w-pw)
+}
+
+func (m Model) renderGraphCompact(innerW int) string {
+	focus := " "
 	if m.focus == paneGraph {
-		focusMark = "▶"
+		focus = "▶"
 	}
-	title := m.theme.Accent.Render(focusMark + " Bandwidth")
-	lines := make([]string, 0, rows)
-	lines = append(lines, fitLine(title, cols))
+	filter := "all"
+	if m.filterIface != "" {
+		filter = m.filterIface
+	}
+	title := m.theme.Accent.Render(fmt.Sprintf("%s Bandwidth · %s", focus, truncate(filter, 24)))
 	if len(m.samples) == 0 {
-		lines = append(lines, fitLine(m.theme.Muted.Render(" waiting for traffic…"), cols))
-	} else {
-		chartW := max(10, cols-2)
-		chart := sparkline(m.samples, chartW, 1)
-		lines = append(lines, fitLine(m.theme.Graph.Render(chart), cols))
-		last := m.samples[len(m.samples)-1]
-		stats := m.theme.Rx.Render(fmt.Sprintf("↓ %-10s", humanRate(last.RxBps))) + "  " +
-			m.theme.Tx.Render(fmt.Sprintf("↑ %-10s", humanRate(last.TxBps))) + "  " +
-			m.theme.Muted.Render(fmt.Sprintf("Σ %-10s", humanRate(last.TotalBps)))
-		lines = append(lines, fitLine(stats, cols))
+		return title + "\n" + m.theme.Muted.Render(" waiting for traffic…")
 	}
-	return joinFixed(lines, rows, cols)
+	chartW := max(12, innerW-2)
+	chart := m.theme.Graph.Render(sparkline(m.samples, chartW, 1))
+	last := m.samples[len(m.samples)-1]
+	// Put rates on same visual band as chart (2 lines total inside border).
+	stats := m.theme.Rx.Render(fmt.Sprintf("↓%-9s", humanRate(last.RxBps))) + " " +
+		m.theme.Tx.Render(fmt.Sprintf("↑%-9s", humanRate(last.TxBps))) + " " +
+		m.theme.Muted.Render(fmt.Sprintf("Σ%-9s", humanRate(last.TotalBps)))
+	// Single content line: chart; second: title+stats squeezed
+	return fitLine(title+"  "+stats, innerW) + "\n" + fitLine(chart, innerW)
 }
 
 func (m Model) renderAppsBody(rows, cols int) string {
@@ -450,23 +547,17 @@ func (m Model) renderAppsBody(rows, cols int) string {
 		focusMark = "▶"
 	}
 	title := m.theme.Accent.Render(focusMark + " Applications (by usage)")
-	lines := make([]string, 0, rows)
-	lines = append(lines, fitLine(title, cols))
+	lines := []string{fitLine(title, cols)}
 	if len(m.apps) == 0 {
 		lines = append(lines, fitLine(m.theme.Muted.Render(" no apps yet"), cols))
 		return joinFixed(lines, rows, cols)
 	}
-
-	// Fixed columns: mark(1) name(16) bar barW rate(10) up(9) down(9)
 	barW := max(8, min(20, cols/5))
-	nameW := 16
-	// remaining room for numbers
+	nameW := 18
 	maxScale := m.smoothMaxRate
 	if maxScale < 1 {
 		maxScale = 1
 	}
-
-	// How many data rows fit under the title.
 	dataRows := rows - 1
 	if dataRows < 1 {
 		dataRows = 1
@@ -480,9 +571,16 @@ func (m Model) renderAppsBody(rows, cols int) string {
 			rate = a.RateInBps + a.RateOutBps
 		}
 		bar := rateBar(rate/maxScale, barW)
-		// Fixed-width fields prevent horizontal jitter.
+		name := a.Name
+		if name == "" || name == "unknown" {
+			if a.PID > 0 {
+				name = fmt.Sprintf("pid:%d", a.PID)
+			} else {
+				name = "unknown"
+			}
+		}
 		line := fmt.Sprintf("%s %s %10s  ↑%-8s ↓%-8s",
-			padRight(truncate(a.Name, nameW), nameW),
+			padRight(truncate(name, nameW), nameW),
 			bar,
 			humanRate(rate),
 			humanBytes(a.BytesOut),
@@ -504,14 +602,13 @@ func (m Model) renderDetailBody(rows, cols int) string {
 		focusMark = "▶"
 	}
 	title := m.theme.Accent.Render(focusMark + " Detail")
-	lines := make([]string, 0, rows)
-	lines = append(lines, fitLine(title, cols))
+	lines := []string{fitLine(title, cols)}
 	if m.selected < 0 || m.selected >= len(m.apps) {
 		lines = append(lines, fitLine(m.theme.Muted.Render(" select an application"), cols))
 		return joinFixed(lines, rows, cols)
 	}
 	a := m.apps[m.selected]
-	head := fmt.Sprintf("%s · pid %d · flows %d", truncate(a.Name, 20), a.PID, a.Flows)
+	head := fmt.Sprintf("%s · pid %d · flows %d", truncate(a.Name, 24), a.PID, a.Flows)
 	if a.Path != "" {
 		head += " · " + truncate(a.Path, max(8, cols/3))
 	}
@@ -524,8 +621,8 @@ func (m Model) renderDetailBody(rows, cols int) string {
 		if len(lines) >= rows {
 			break
 		}
-		line := fmt.Sprintf("%s %s:%d ↔ %s:%d  in %s out %s",
-			f.Key.Protocol, f.Key.SrcIP, f.Key.SrcPort, f.Key.DstIP, f.Key.DstPort,
+		line := fmt.Sprintf("%s %s %s:%d ↔ %s:%d  in %s out %s",
+			f.Key.Iface, f.Key.Protocol, f.Key.SrcIP, f.Key.SrcPort, f.Key.DstIP, f.Key.DstPort,
 			humanBytes(f.BytesIn), humanBytes(f.BytesOut),
 		)
 		lines = append(lines, fitLine(m.theme.Muted.Render(truncate(line, cols)), cols))
@@ -533,7 +630,6 @@ func (m Model) renderDetailBody(rows, cols int) string {
 	return joinFixed(lines, rows, cols)
 }
 
-// joinFixed pads or trims to exactly `rows` lines of width `cols`.
 func joinFixed(lines []string, rows, cols int) string {
 	for len(lines) < rows {
 		lines = append(lines, strings.Repeat(" ", cols))
@@ -547,7 +643,6 @@ func joinFixed(lines []string, rows, cols int) string {
 	return strings.Join(lines, "\n")
 }
 
-// padBlock ensures a block occupies exactly `rows` terminal rows of width `cols`.
 func padBlock(s string, cols, rows int) string {
 	parts := strings.Split(s, "\n")
 	for i := range parts {
@@ -566,13 +661,11 @@ func fitLine(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	// Strip ANSI for length check via lipgloss, then pad.
 	plain := lipgloss.Width(s)
 	if plain == width {
 		return s
 	}
 	if plain > width {
-		// Truncate carefully: use runes of plain text when no styles, else pad left cut.
 		return lipgloss.NewStyle().MaxWidth(width).Render(s)
 	}
 	return s + strings.Repeat(" ", width-plain)
@@ -617,7 +710,7 @@ func sparkline(samples []domain.BandwidthSample, width, height int) string {
 		row.WriteRune(blocks[idx])
 	}
 	for utf8.RuneCountInString(row.String()) < width {
-		row.WriteRune('▁') // stable filler instead of spaces (less visual jump)
+		row.WriteRune('▁')
 	}
 	_ = height
 	return row.String()

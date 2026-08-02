@@ -60,6 +60,34 @@ func TestIngestAndRankApps(t *testing.T) {
 	}
 }
 
+func TestIfaceFilterApps(t *testing.T) {
+	s := New(Config{MaxFlows: 100, MaxSamples: 60, MaxApps: 50})
+	now := time.Now()
+	s.Ingest(domain.Observation{
+		Time: now, Iface: "eth0", Direction: domain.DirectionRx, Length: 1000,
+		Protocol: domain.ProtoTCP, SrcIP: "1.1.1.1", DstIP: "10.0.0.2",
+		SrcPort: 443, DstPort: 1, AppHint: "browser", PIDHint: 1,
+	})
+	s.Ingest(domain.Observation{
+		Time: now, Iface: "wlan0", Direction: domain.DirectionRx, Length: 5000,
+		Protocol: domain.ProtoTCP, SrcIP: "1.1.1.1", DstIP: "10.0.0.3",
+		SrcPort: 443, DstPort: 2, AppHint: "browser", PIDHint: 1,
+	})
+	s.SetIfaceFilter("wlan0")
+	apps := s.ListAppsByBandwidth(10)
+	if len(apps) != 1 {
+		t.Fatalf("want 1 app, got %d", len(apps))
+	}
+	if apps[0].BytesIn != 5000 {
+		t.Fatalf("filtered bytes %d", apps[0].BytesIn)
+	}
+	s.SetIfaceFilter("")
+	apps = s.ListAppsByBandwidth(10)
+	if apps[0].BytesIn != 6000 {
+		t.Fatalf("all bytes %d", apps[0].BytesIn)
+	}
+}
+
 func TestEvictRespectsMaxFlows(t *testing.T) {
 	s := New(Config{MaxFlows: 5, MaxSamples: 10, MaxApps: 20})
 	now := time.Now()

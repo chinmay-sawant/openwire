@@ -6,25 +6,29 @@ import "github.com/charmbracelet/lipgloss"
 type Theme struct {
 	Name string
 
-	App      lipgloss.Style
-	Title    lipgloss.Style
-	Border   lipgloss.Style
-	Status   lipgloss.Style
-	Muted    lipgloss.Style
-	Accent   lipgloss.Style
-	Selected lipgloss.Style
-	Graph    lipgloss.Style
-	Rx       lipgloss.Style
-	Tx       lipgloss.Style
-	Warn     lipgloss.Style
-	Help     lipgloss.Style
-	BarFill  lipgloss.Style
-	BarEmpty lipgloss.Style
+	App       lipgloss.Style
+	Title     lipgloss.Style
+	Border    lipgloss.Style
+	Status    lipgloss.Style
+	Muted     lipgloss.Style
+	Accent    lipgloss.Style
+	Selected  lipgloss.Style
+	Graph     lipgloss.Style
+	Rx        lipgloss.Style
+	Tx        lipgloss.Style
+	Warn      lipgloss.Style
+	Help      lipgloss.Style
+	BarFill   lipgloss.Style
+	BarEmpty  lipgloss.Style
+	HeaderBar lipgloss.Style
+	ChipOn    lipgloss.Style
+	ChipOff   lipgloss.Style
 }
 
 // DarkTheme is the default OpenWire palette.
 func DarkTheme() Theme {
 	bg := lipgloss.Color("#0d1117")
+	headerBg := lipgloss.Color("#161b22")
 	fg := lipgloss.Color("#e6edf3")
 	muted := lipgloss.Color("#8b949e")
 	border := lipgloss.Color("#30363d")
@@ -33,6 +37,7 @@ func DarkTheme() Theme {
 	red := lipgloss.Color("#f85149")
 	yellow := lipgloss.Color("#d29922")
 	selBg := lipgloss.Color("#1f6feb")
+	chipOffBg := lipgloss.Color("#21262d")
 
 	return Theme{
 		Name: "dark",
@@ -42,7 +47,7 @@ func DarkTheme() Theme {
 		Title: lipgloss.NewStyle().
 			Bold(true).
 			Foreground(accent).
-			Background(bg),
+			Background(headerBg),
 		Border: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(border).
@@ -50,7 +55,7 @@ func DarkTheme() Theme {
 			Background(bg),
 		Status: lipgloss.NewStyle().
 			Foreground(muted).
-			Background(bg),
+			Background(headerBg),
 		Muted: lipgloss.NewStyle().
 			Foreground(muted).
 			Background(bg),
@@ -84,5 +89,15 @@ func DarkTheme() Theme {
 		BarEmpty: lipgloss.NewStyle().
 			Foreground(border).
 			Background(bg),
+		HeaderBar: lipgloss.NewStyle().
+			Foreground(fg).
+			Background(headerBg),
+		ChipOn: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#ffffff")).
+			Background(selBg).
+			Bold(true),
+		ChipOff: lipgloss.NewStyle().
+			Foreground(muted).
+			Background(chipOffBg),
 	}
 }

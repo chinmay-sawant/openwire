@@ -56,6 +56,7 @@ func (a *Attributor) Run(done <-chan struct{}) {
 }
 
 // Annotate fills AppHint/PIDHint when known.
+// Prefer real process/binary names over empty or "unknown".
 func (a *Attributor) Annotate(o *domain.Observation) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -68,12 +69,44 @@ func (a *Attributor) Annotate(o *domain.Observation) {
 			if o.PIDHint == 0 {
 				o.PIDHint = info.pid
 			}
-			if o.AppHint == "" {
-				o.AppHint = info.name
+			if needsAppName(o.AppHint) {
+				o.AppHint = preferredName(info.name, info.path)
 			}
 			return
 		}
 	}
+	// Last resort: PID → binary if we already have a pid hint.
+	if o.PIDHint > 0 && needsAppName(o.AppHint) {
+		name, path := procName(o.PIDHint)
+		o.AppHint = preferredName(name, path)
+	}
+}
+
+func needsAppName(hint string) bool {
+	return hint == "" || hint == "unknown" || strings.HasPrefix(hint, "pid:")
+}
+
+func preferredName(name, path string) string {
+	if path != "" {
+		base := filepath.Base(path)
+		// Prefer executable basename when comm is generic/empty.
+		if base != "" && base != "." {
+			if name == "" || name == "unknown" || strings.HasPrefix(name, "pid:") {
+				return base
+			}
+			// Prefer longer/more specific binary name when different.
+			if len(base) >= len(name) {
+				return base
+			}
+		}
+	}
+	if name != "" {
+		return name
+	}
+	if path != "" {
+		return filepath.Base(path)
+	}
+	return "unknown"
 }
 
 func (a *Attributor) refresh() {
@@ -206,8 +239,9 @@ func procName(pid int) (name, path string) {
 	}
 	if p, err := os.Readlink(filepath.Join(base, "exe")); err == nil {
 		path = p
-		if name == "" {
-			name = filepath.Base(p)
+		// Prefer binary basename as the display name when available.
+		if bn := filepath.Base(p); bn != "" && bn != "." {
+			name = bn
 		}
 	}
 	if name == "" {

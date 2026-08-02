@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -248,6 +249,12 @@ func Run(ctx context.Context, cfg Config) error {
 				if attrs != nil {
 					attrs.Annotate(&o)
 				}
+				// Prefer binary name over empty/unknown whenever we have a PID.
+				if (o.AppHint == "" || o.AppHint == "unknown" || strings.HasPrefix(o.AppHint, "pid:")) && o.PIDHint > 0 {
+					if n := capture.ProcessName(o.PIDHint); n != "" {
+						o.AppHint = n
+					}
+				}
 				store.Ingest(o)
 			}
 		}
@@ -320,6 +327,9 @@ func runEBPFSide(ctx context.Context, store *memory.Store, ifaces []string) {
 
 func sampleHostLoop(ctx context.Context, store *memory.Store, isWSL bool, mode domain.CaptureMode, privOK bool, baseMsg string) {
 	prev := map[string]wsl.HostAdapterStats{}
+	// Warm process cache early so first traffic tick can attribute by name.
+	go func() { _ = wsl.ListWindowsProcesses(ctx) }()
+
 	if stats := wsl.SampleHostAdapterStats(ctx); len(stats) > 0 {
 		adapters := store.ListAdapters()
 		merged, next := wsl.MergeHostStatsIntoAdapters(adapters, stats, nil, 1)
@@ -348,14 +358,12 @@ func sampleHostLoop(ctx context.Context, store *memory.Store, isWSL bool, mode d
 			for _, o := range obs {
 				store.Ingest(o)
 			}
+			// Keep status short so header stays clean; process count is the signal.
 			msg := baseMsg
-			if msg != "" {
-				msg += " · "
-			}
 			if len(procs) > 0 {
-				msg += fmt.Sprintf("win processes %d", len(procs))
-			} else {
-				msg += "windows host counters"
+				msg = fmt.Sprintf("win/%d procs", len(procs))
+			} else if msg == "" {
+				msg = "windows host"
 			}
 			store.SetStatus(domain.Status{
 				Mode: mode, Running: true, PrivilegeOK: privOK, Message: msg, IsWSL2: isWSL,

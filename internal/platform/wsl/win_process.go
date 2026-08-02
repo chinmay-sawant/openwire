@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chinmay-sawant/openwire/internal/domain"
@@ -12,62 +13,98 @@ import (
 
 // WinProcess is a Windows host process that currently owns network endpoints.
 type WinProcess struct {
-	PID       int
-	Name      string
-	ConnCount int
-	// Optional sample endpoints for flow display.
-	LocalIP   string
-	LocalPort uint16
-	RemoteIP  string
+	PID        int
+	Name       string
+	ConnCount  int
+	LocalIP    string
+	LocalPort  uint16
+	RemoteIP   string
 	RemotePort uint16
-	Protocol  domain.Protocol
+	Protocol   domain.Protocol
 }
 
+var (
+	procCacheMu sync.Mutex
+	procCache   []WinProcess
+	procCacheAt time.Time
+)
+
 // ListWindowsProcesses best-effort inventories Windows processes with open TCP/UDP endpoints.
-// Returns nil when not on WSL2 or when host tooling is unavailable.
+// Results are cached briefly to keep the UI loop responsive.
 func ListWindowsProcesses(ctx context.Context) []WinProcess {
 	if !IsWSL2() {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	procCacheMu.Lock()
+	if time.Since(procCacheAt) < 4*time.Second && len(procCache) > 0 {
+		out := append([]WinProcess(nil), procCache...)
+		procCacheMu.Unlock()
+		return out
+	}
+	procCacheMu.Unlock()
+
+	ps := powershellPath()
+	if ps == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 
-	// One PowerShell invocation: map PID→name, then emit connection rows.
+	// Faster script: only Established TCP + UDP endpoints; ProcessName via CIM.
 	script := `
 $ErrorActionPreference='SilentlyContinue'
 $names = @{}
-Get-Process | ForEach-Object { $names[$_.Id] = $_.ProcessName }
-function Emit-Row($proto, $pid, $la, $lp, $ra, $rp) {
-  if ($null -eq $pid -or $pid -le 0) { return }
-  $n = $names[$pid]
+Get-CimInstance Win32_Process | ForEach-Object { $names[$_.ProcessId] = $_.Name }
+function Emit($proto,$pid,$la,$lp,$ra,$rp) {
+  if ($null -eq $pid -or [int]$pid -le 0) { return }
+  $n = $names[[int]$pid]
   if (-not $n) { $n = "pid:$pid" }
+  else { $n = ($n -replace '\.exe$','') }
   if (-not $la) { $la = '' }
   if (-not $ra) { $ra = '' }
   if ($null -eq $lp) { $lp = 0 }
   if ($null -eq $rp) { $rp = 0 }
   '{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f $pid, $n, $la, $lp, $ra, $rp, $proto
 }
-Get-NetTCPConnection | ForEach-Object {
-  Emit-Row 'tcp' $_.OwningProcess $_.LocalAddress $_.LocalPort $_.RemoteAddress $_.RemotePort
+Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | ForEach-Object {
+  Emit 'tcp' $_.OwningProcess $_.LocalAddress $_.LocalPort $_.RemoteAddress $_.RemotePort
 }
-Get-NetUDPEndpoint | ForEach-Object {
-  Emit-Row 'udp' $_.OwningProcess $_.LocalAddress $_.LocalPort '' 0
+Get-NetUDPEndpoint -ErrorAction SilentlyContinue | ForEach-Object {
+  Emit 'udp' $_.OwningProcess $_.LocalAddress $_.LocalPort '' 0
 }
 `
-	ps := powershellPath()
-	if ps == "" {
-		return nil
-	}
 	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-Command", script)
 	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
-		return nil
+		// Fallback simpler script
+		out2, err2 := listProcessesFallback(ctx, ps)
+		if err2 != nil || len(out2) == 0 {
+			return nil
+		}
+		out = out2
 	}
-	return parseWindowsProcessRows(string(out))
+	procs := parseWindowsProcessRows(string(out))
+	procCacheMu.Lock()
+	procCache = procs
+	procCacheAt = time.Now()
+	procCacheMu.Unlock()
+	return procs
+}
+
+func listProcessesFallback(ctx context.Context, ps string) ([]byte, error) {
+	script := `
+$ErrorActionPreference='SilentlyContinue'
+$names=@{}; Get-Process | % { $names[$_.Id]=$_.ProcessName }
+Get-NetTCPConnection | % {
+  $n=$names[$_.OwningProcess]; if(-not $n){$n="pid:$($_.OwningProcess)"}
+  "{0}|{1}|{2}|{3}|{4}|{5}|tcp" -f $_.OwningProcess,$n,$_.LocalAddress,$_.LocalPort,$_.RemoteAddress,$_.RemotePort
+}
+`
+	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-Command", script)
+	return cmd.Output()
 }
 
 // parseWindowsProcessRows aggregates pipe-delimited rows into weighted processes.
-// Exported for tests via package-level use (same package tests).
 func parseWindowsProcessRows(raw string) []WinProcess {
 	type acc struct {
 		p     WinProcess
@@ -88,6 +125,7 @@ func parseWindowsProcessRows(raw string) []WinProcess {
 			continue
 		}
 		name := strings.TrimSpace(parts[1])
+		name = strings.TrimSuffix(name, ".exe")
 		if name == "" {
 			name = "pid:" + strconv.Itoa(pid)
 		}
@@ -129,10 +167,14 @@ func HostTrafficObservationsByProcess(
 	prev map[string]HostAdapterStats,
 	processes []WinProcess,
 ) (obs []domain.Observation, next map[string]HostAdapterStats) {
-	// Always advance prev map.
 	next = make(map[string]HostAdapterStats, len(stats))
+	type delta struct {
+		name string
+		rx   uint64
+		tx   uint64
+	}
+	var deltas []delta
 	var totalRx, totalTx uint64
-	var sampleIface string
 	for _, s := range stats {
 		next[s.Name] = s
 		p, ok := prev[s.Name]
@@ -146,11 +188,12 @@ func HostTrafficObservationsByProcess(
 		if s.TxBytes >= p.TxBytes {
 			dtx = s.TxBytes - p.TxBytes
 		}
+		if drx == 0 && dtx == 0 {
+			continue
+		}
 		totalRx += drx
 		totalTx += dtx
-		if sampleIface == "" {
-			sampleIface = "win:" + s.Name
-		}
+		deltas = append(deltas, delta{name: s.Name, rx: drx, tx: dtx})
 	}
 	for k, v := range prev {
 		if _, ok := next[k]; !ok {
@@ -161,72 +204,68 @@ func HostTrafficObservationsByProcess(
 	if totalRx == 0 && totalTx == 0 {
 		return nil, next
 	}
-	if sampleIface == "" {
-		sampleIface = "win:host"
-	}
 
 	if len(processes) == 0 {
-		return hostAggregateObs(now, sampleIface, totalRx, totalTx), next
+		for _, d := range deltas {
+			iface := "win:" + d.name
+			obs = append(obs, hostAggregateObs(now, iface, d.rx, d.tx)...)
+		}
+		return obs, next
 	}
 
 	totalConns := 0
 	for _, p := range processes {
-		if p.ConnCount > 0 {
-			totalConns += p.ConnCount
-		} else {
-			totalConns++
+		w := p.ConnCount
+		if w <= 0 {
+			w = 1
 		}
+		totalConns += w
 	}
 	if totalConns <= 0 {
-		return hostAggregateObs(now, sampleIface, totalRx, totalTx), next
+		for _, d := range deltas {
+			obs = append(obs, hostAggregateObs(now, "win:"+d.name, d.rx, d.tx)...)
+		}
+		return obs, next
 	}
 
-	var assignedRx, assignedTx uint64
-	for i, p := range processes {
-		weight := p.ConnCount
-		if weight <= 0 {
-			weight = 1
-		}
-		var rxShare, txShare uint64
-		if i < len(processes)-1 {
-			rxShare = totalRx * uint64(weight) / uint64(totalConns)
-			txShare = totalTx * uint64(weight) / uint64(totalConns)
-			assignedRx += rxShare
-			assignedTx += txShare
-		} else {
-			rxShare = totalRx - assignedRx
-			txShare = totalTx - assignedTx
-		}
-		app := "win/" + sanitizeAppName(p.Name)
-		if rxShare > 0 {
-			obs = append(obs, domain.Observation{
-				Time:      now,
-				Iface:     sampleIface,
-				Direction: domain.DirectionRx,
-				Length:    clampInt(rxShare),
-				Protocol:  p.Protocol,
-				SrcIP:     p.RemoteIP,
-				SrcPort:   p.RemotePort,
-				DstIP:     p.LocalIP,
-				DstPort:   p.LocalPort,
-				AppHint:   app,
-				PIDHint:   p.PID,
-			})
-		}
-		if txShare > 0 {
-			obs = append(obs, domain.Observation{
-				Time:      now,
-				Iface:     sampleIface,
-				Direction: domain.DirectionTx,
-				Length:    clampInt(txShare),
-				Protocol:  p.Protocol,
-				SrcIP:     p.LocalIP,
-				SrcPort:   p.LocalPort,
-				DstIP:     p.RemoteIP,
-				DstPort:   p.RemotePort,
-				AppHint:   app,
-				PIDHint:   p.PID,
-			})
+	// Attribute each adapter's delta across processes (same weights).
+	for _, d := range deltas {
+		iface := "win:" + d.name
+		var assignedRx, assignedTx uint64
+		for i, p := range processes {
+			weight := p.ConnCount
+			if weight <= 0 {
+				weight = 1
+			}
+			var rxShare, txShare uint64
+			if i < len(processes)-1 {
+				rxShare = d.rx * uint64(weight) / uint64(totalConns)
+				txShare = d.tx * uint64(weight) / uint64(totalConns)
+				assignedRx += rxShare
+				assignedTx += txShare
+			} else {
+				rxShare = d.rx - assignedRx
+				txShare = d.tx - assignedTx
+			}
+			app := "win/" + sanitizeAppName(p.Name)
+			if rxShare > 0 {
+				obs = append(obs, domain.Observation{
+					Time: now, Iface: iface, Direction: domain.DirectionRx,
+					Length: clampInt(rxShare), Protocol: p.Protocol,
+					SrcIP: p.RemoteIP, SrcPort: p.RemotePort,
+					DstIP: p.LocalIP, DstPort: p.LocalPort,
+					AppHint: app, PIDHint: p.PID,
+				})
+			}
+			if txShare > 0 {
+				obs = append(obs, domain.Observation{
+					Time: now, Iface: iface, Direction: domain.DirectionTx,
+					Length: clampInt(txShare), Protocol: p.Protocol,
+					SrcIP: p.LocalIP, SrcPort: p.LocalPort,
+					DstIP: p.RemoteIP, DstPort: p.RemotePort,
+					AppHint: app, PIDHint: p.PID,
+				})
+			}
 		}
 	}
 	return obs, next
@@ -251,10 +290,10 @@ func hostAggregateObs(now time.Time, iface string, rx, tx uint64) []domain.Obser
 
 func sanitizeAppName(name string) string {
 	name = strings.TrimSpace(name)
+	name = strings.TrimSuffix(name, ".exe")
 	if name == "" {
 		return "unknown"
 	}
-	// Avoid pipe/control noise in UI keys.
 	name = strings.ReplaceAll(name, "|", "_")
 	name = strings.ReplaceAll(name, "#", "_")
 	return name

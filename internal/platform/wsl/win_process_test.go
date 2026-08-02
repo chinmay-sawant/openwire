@@ -43,7 +43,6 @@ func TestHostTrafficObservationsByProcessWeights(t *testing.T) {
 	if next["Wi-Fi"].RxBytes != 4000 {
 		t.Fatalf("next: %+v", next)
 	}
-	// chrome weight 2/3 of 3000 = 2000 rx; Code 1000 rx
 	rxByApp := map[string]int{}
 	txByApp := map[string]int{}
 	for _, o := range obs {
@@ -51,6 +50,9 @@ func TestHostTrafficObservationsByProcessWeights(t *testing.T) {
 			rxByApp[o.AppHint] += o.Length
 		} else {
 			txByApp[o.AppHint] += o.Length
+		}
+		if o.Iface != "win:Wi-Fi" {
+			t.Fatalf("iface %s", o.Iface)
 		}
 	}
 	if rxByApp["win/chrome"] != 2000 {
@@ -77,5 +79,8 @@ func TestHostTrafficObservationsByProcessFallback(t *testing.T) {
 	obs, _ := HostTrafficObservationsByProcess(time.Now(), stats, prev, nil)
 	if len(obs) != 1 || obs[0].AppHint != "windows-host" {
 		t.Fatalf("fallback: %+v", obs)
+	}
+	if obs[0].Iface != "win:Eth" {
+		t.Fatalf("iface %s", obs[0].Iface)
 	}
 }
