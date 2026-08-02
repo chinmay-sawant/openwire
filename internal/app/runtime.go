@@ -358,12 +358,19 @@ func sampleHostLoop(ctx context.Context, store *memory.Store, isWSL bool, mode d
 			for _, o := range obs {
 				store.Ingest(o)
 			}
-			// Keep status short so header stays clean; process count is the signal.
+			// Status shows whether process split worked (not aggregate-only).
 			msg := baseMsg
 			if len(procs) > 0 {
-				msg = fmt.Sprintf("win/%d procs", len(procs))
-			} else if msg == "" {
-				msg = "windows host"
+				named := 0
+				for _, p := range procs {
+					if p.Name != "" && !strings.HasPrefix(p.Name, "pid:") {
+						named++
+					}
+				}
+				msg = fmt.Sprintf("win %d apps", named)
+			} else {
+				msg = "win aggregate (no process list)"
+				slog.Debug("windows process list empty; traffic attributed to windows-host")
 			}
 			store.SetStatus(domain.Status{
 				Mode: mode, Running: true, PrivilegeOK: privOK, Message: msg, IsWSL2: isWSL,
