@@ -2,6 +2,7 @@ package wsl
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -36,7 +37,7 @@ func ListWindowsProcesses(ctx context.Context) []WinProcess {
 		return nil
 	}
 	procCacheMu.Lock()
-	if time.Since(procCacheAt) < 4*time.Second && len(procCache) > 0 {
+	if time.Since(procCacheAt) < 5*time.Second && len(procCache) > 0 {
 		out := append([]WinProcess(nil), procCache...)
 		procCacheMu.Unlock()
 		return out
@@ -47,19 +48,28 @@ func ListWindowsProcesses(ctx context.Context) []WinProcess {
 	if ps == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	// Faster script: only Established TCP + UDP endpoints; ProcessName via CIM.
+	// Resolve names with Get-Process (reliable). Hashtable key = [int]Id.
+	// Avoid Get-CimInstance map lookups which often miss OwningProcess keys from WSL.
 	script := `
-$ErrorActionPreference='SilentlyContinue'
+$ErrorActionPreference = 'SilentlyContinue'
 $names = @{}
-Get-CimInstance Win32_Process | ForEach-Object { $names[$_.ProcessId] = $_.Name }
-function Emit($proto,$pid,$la,$lp,$ra,$rp) {
-  if ($null -eq $pid -or [int]$pid -le 0) { return }
-  $n = $names[[int]$pid]
-  if (-not $n) { $n = "pid:$pid" }
-  else { $n = ($n -replace '\.exe$','') }
+Get-Process | ForEach-Object { $names[[int]$_.Id] = [string]$_.ProcessName }
+function Emit-Row([string]$proto, $opid, $la, $lp, $ra, $rp) {
+  try { $pid = [int]$opid } catch { return }
+  if ($pid -le 0) { return }
+  $n = $names[$pid]
+  if ([string]::IsNullOrWhiteSpace($n)) {
+    try {
+      $n = [string](Get-Process -Id $pid -ErrorAction Stop).ProcessName
+      $names[$pid] = $n
+    } catch {
+      $n = ''
+    }
+  }
+  if ([string]::IsNullOrWhiteSpace($n)) { $n = "pid:$pid" }
   if (-not $la) { $la = '' }
   if (-not $ra) { $ra = '' }
   if ($null -eq $lp) { $lp = 0 }
@@ -67,16 +77,15 @@ function Emit($proto,$pid,$la,$lp,$ra,$rp) {
   '{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f $pid, $n, $la, $lp, $ra, $rp, $proto
 }
 Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | ForEach-Object {
-  Emit 'tcp' $_.OwningProcess $_.LocalAddress $_.LocalPort $_.RemoteAddress $_.RemotePort
+  Emit-Row 'tcp' $_.OwningProcess $_.LocalAddress $_.LocalPort $_.RemoteAddress $_.RemotePort
 }
 Get-NetUDPEndpoint -ErrorAction SilentlyContinue | ForEach-Object {
-  Emit 'udp' $_.OwningProcess $_.LocalAddress $_.LocalPort '' 0
+  Emit-Row 'udp' $_.OwningProcess $_.LocalAddress $_.LocalPort '' 0
 }
 `
 	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-Command", script)
 	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
-		// Fallback simpler script
 		out2, err2 := listProcessesFallback(ctx, ps)
 		if err2 != nil || len(out2) == 0 {
 			return nil
@@ -84,6 +93,9 @@ Get-NetUDPEndpoint -ErrorAction SilentlyContinue | ForEach-Object {
 		out = out2
 	}
 	procs := parseWindowsProcessRows(string(out))
+	// Second pass: resolve any remaining pid:N via individual Get-Process.
+	procs = resolveMissingNames(ctx, ps, procs)
+
 	procCacheMu.Lock()
 	procCache = procs
 	procCacheAt = time.Now()
@@ -94,14 +106,73 @@ Get-NetUDPEndpoint -ErrorAction SilentlyContinue | ForEach-Object {
 func listProcessesFallback(ctx context.Context, ps string) ([]byte, error) {
 	script := `
 $ErrorActionPreference='SilentlyContinue'
-$names=@{}; Get-Process | % { $names[$_.Id]=$_.ProcessName }
-Get-NetTCPConnection | % {
-  $n=$names[$_.OwningProcess]; if(-not $n){$n="pid:$($_.OwningProcess)"}
-  "{0}|{1}|{2}|{3}|{4}|{5}|tcp" -f $_.OwningProcess,$n,$_.LocalAddress,$_.LocalPort,$_.RemoteAddress,$_.RemotePort
+$names=@{}
+Get-Process | ForEach-Object { $names[[int]$_.Id]=[string]$_.ProcessName }
+Get-NetTCPConnection -ErrorAction SilentlyContinue | ForEach-Object {
+  $pid=[int]$_.OwningProcess
+  if ($pid -le 0) { return }
+  $n=$names[$pid]
+  if ([string]::IsNullOrWhiteSpace($n)) { $n = "pid:$pid" }
+  "{0}|{1}|{2}|{3}|{4}|{5}|tcp" -f $pid,$n,$_.LocalAddress,$_.LocalPort,$_.RemoteAddress,$_.RemotePort
 }
 `
 	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-Command", script)
 	return cmd.Output()
+}
+
+// resolveMissingNames fixes rows that only have pid:N by querying Get-Process.
+func resolveMissingNames(ctx context.Context, ps string, procs []WinProcess) []WinProcess {
+	var missing []int
+	for _, p := range procs {
+		if strings.HasPrefix(p.Name, "pid:") || p.Name == "" {
+			missing = append(missing, p.PID)
+		}
+	}
+	if len(missing) == 0 {
+		return procs
+	}
+	// Cap bulk resolve.
+	if len(missing) > 40 {
+		missing = missing[:40]
+	}
+	ids := make([]string, len(missing))
+	for i, id := range missing {
+		ids[i] = strconv.Itoa(id)
+	}
+	script := fmt.Sprintf(`
+$ErrorActionPreference='SilentlyContinue'
+@(%s) | ForEach-Object {
+  $p = Get-Process -Id $_ -ErrorAction SilentlyContinue
+  if ($p) { "{0}|{1}" -f $_, $p.ProcessName }
+}
+`, strings.Join(ids, ","))
+	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-Command", script)
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return procs
+	}
+	resolved := map[int]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+		name := strings.TrimSpace(parts[1])
+		if name != "" {
+			resolved[pid] = name
+		}
+	}
+	for i := range procs {
+		if n, ok := resolved[procs[i].PID]; ok {
+			procs[i].Name = n
+		}
+	}
+	return procs
 }
 
 // parseWindowsProcessRows aggregates pipe-delimited rows into weighted processes.
@@ -147,6 +218,8 @@ func parseWindowsProcessRows(raw string) []WinProcess {
 				Protocol:   proto,
 			}}
 			byPID[pid] = a
+		} else if strings.HasPrefix(a.p.Name, "pid:") && !strings.HasPrefix(name, "pid:") {
+			a.p.Name = name
 		}
 		a.count++
 		a.p.ConnCount = a.count
@@ -156,6 +229,15 @@ func parseWindowsProcessRows(raw string) []WinProcess {
 		out = append(out, a.p)
 	}
 	return out
+}
+
+// DisplayName returns "name · pid" for UI lists.
+func (p WinProcess) DisplayName() string {
+	n := sanitizeAppName(p.Name)
+	if p.PID > 0 {
+		return fmt.Sprintf("%s · %d", n, p.PID)
+	}
+	return n
 }
 
 // HostTrafficObservationsByProcess distributes host adapter byte deltas across
@@ -228,7 +310,6 @@ func HostTrafficObservationsByProcess(
 		return obs, next
 	}
 
-	// Attribute each adapter's delta across processes (same weights).
 	for _, d := range deltas {
 		iface := "win:" + d.name
 		var assignedRx, assignedTx uint64
@@ -247,6 +328,7 @@ func HostTrafficObservationsByProcess(
 				rxShare = d.rx - assignedRx
 				txShare = d.tx - assignedTx
 			}
+			// AppHint: win/<name> — PID carried separately so UI can show "name · pid".
 			app := "win/" + sanitizeAppName(p.Name)
 			if rxShare > 0 {
 				obs = append(obs, domain.Observation{
@@ -294,6 +376,7 @@ func sanitizeAppName(name string) string {
 	if name == "" {
 		return "unknown"
 	}
+	// Strip accidental pid: prefix if name resolution later filled real name elsewhere.
 	name = strings.ReplaceAll(name, "|", "_")
 	name = strings.ReplaceAll(name, "#", "_")
 	return name

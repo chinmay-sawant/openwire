@@ -91,7 +91,9 @@ func DarkTheme() Theme {
 			Background(bg),
 		HeaderBar: lipgloss.NewStyle().
 			Foreground(fg).
-			Background(headerBg),
+			Background(headerBg).
+			// Full-cell background including padding spaces.
+			Inline(true),
 		ChipOn: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#ffffff")).
 			Background(selBg).

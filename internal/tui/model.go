@@ -51,6 +51,9 @@ type Model struct {
 	headerChips   []chip
 	smoothMaxRate float64
 	displayRates  map[string]float64
+	smoothSamples []domain.BandwidthSample
+	smoothHdrRx   float64
+	smoothHdrTx   float64
 
 	headerH int
 	graphH  int
@@ -163,21 +166,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			m.handleClick(msg.X, msg.Y)
-		}
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelUp {
-			if m.selected > 0 {
-				m.selected--
-				m.syncSelectedKey()
-				m.loadFlows()
+		// Accept press (and release on some terminals) for reliable chip clicks.
+		switch msg.Action {
+		case tea.MouseActionPress, tea.MouseActionRelease:
+			if msg.Button == tea.MouseButtonLeft {
+				m.handleClick(msg.X, msg.Y)
 			}
-		}
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonWheelDown {
-			if m.selected < len(m.apps)-1 {
-				m.selected++
-				m.syncSelectedKey()
-				m.loadFlows()
+			if msg.Button == tea.MouseButtonWheelUp {
+				if m.selected > 0 {
+					m.selected--
+					m.syncSelectedKey()
+					m.loadFlows()
+				}
+			}
+			if msg.Button == tea.MouseButtonWheelDown {
+				if m.selected < len(m.apps)-1 {
+					m.selected++
+					m.syncSelectedKey()
+					m.loadFlows()
+				}
 			}
 		}
 		return m, nil
@@ -203,35 +210,36 @@ func (m *Model) refresh() {
 	m.store.TickSample(time.Now())
 	m.filterIface = m.store.IfaceFilter()
 	raw := m.store.ListAppsByBandwidth(80)
-	m.samples = m.store.Samples()
+	rawSamples := m.store.Samples()
 	m.adapters = m.store.ListAdapters()
 	m.status = m.store.Snapshot()
 	m.toggleNames = buildToggleNames(m.adapters)
-	m.rebuildHeaderChips()
+	// Rebuild chip hitboxes here (not only in View) so clicks see fresh geometry.
+	if m.width > 0 {
+		_, chips := m.renderAdapterChips(m.width)
+		m.headerChips = chips
+	}
 
-	const alpha = 0.35
+	// Asymmetric EMA: moderate rise, slow fall — avoids spike→cliff look.
 	maxR := 0.0
 	for _, a := range raw {
 		r := a.RateInBps + a.RateOutBps
 		prev := m.displayRates[a.Key]
-		if prev <= 0 {
-			prev = r
-		} else {
-			prev = alpha*r + (1-alpha)*prev
-		}
-		m.displayRates[a.Key] = prev
-		if prev > maxR {
-			maxR = prev
+		m.displayRates[a.Key] = smoothRate(prev, r)
+		if m.displayRates[a.Key] > maxR {
+			maxR = m.displayRates[a.Key]
 		}
 	}
-	if m.smoothMaxRate <= 0 {
-		m.smoothMaxRate = maxR
-	} else {
-		m.smoothMaxRate = 0.2*maxR + 0.8*m.smoothMaxRate
-	}
+	m.smoothMaxRate = smoothRate(m.smoothMaxRate, maxR)
 	if m.smoothMaxRate < 1 {
 		m.smoothMaxRate = 1
 	}
+	// Smooth header totals independently.
+	m.smoothHdrRx = smoothRate(m.smoothHdrRx, m.status.TotalRxBps)
+	m.smoothHdrTx = smoothRate(m.smoothHdrTx, m.status.TotalTxBps)
+	// Smooth graph samples (copy + EMA last point into display ring).
+	m.samples = smoothSampleRing(m.smoothSamples, rawSamples)
+	m.smoothSamples = m.samples
 	live := make(map[string]struct{}, len(raw))
 	for _, a := range raw {
 		live[a.Key] = struct{}{}
@@ -293,9 +301,77 @@ func buildToggleNames(ads []domain.Adapter) []string {
 	return names
 }
 
-func (m *Model) rebuildHeaderChips() {
-	// Built during render with real x positions; placeholder ids here.
-	m.headerChips = nil
+// smoothRate eases rates up moderately and down slowly (no cliff drops).
+func smoothRate(prev, next float64) float64 {
+	if prev <= 0 {
+		// ease into first reading instead of snapping
+		return next * 0.45
+	}
+	if next > prev {
+		// attack
+		out := 0.22*next + 0.78*prev
+		// cap rise per tick (~40% of previous, min floor)
+		cap := prev*1.4 + 256
+		if out > cap {
+			out = cap
+		}
+		return out
+	}
+	// release — long tail
+	return 0.10*next + 0.90*prev
+}
+
+func smoothSampleRing(prev, raw []domain.BandwidthSample) []domain.BandwidthSample {
+	if len(raw) == 0 {
+		// decay previous display samples slowly toward zero
+		if len(prev) == 0 {
+			return nil
+		}
+		out := make([]domain.BandwidthSample, len(prev))
+		for i, s := range prev {
+			out[i] = domain.BandwidthSample{
+				Time:     s.Time,
+				RxBps:    s.RxBps * 0.85,
+				TxBps:    s.TxBps * 0.85,
+				TotalBps: s.TotalBps * 0.85,
+			}
+		}
+		return out
+	}
+	out := make([]domain.BandwidthSample, len(raw))
+	for i, s := range raw {
+		if i < len(prev) {
+			// blend each aligned point lightly; last point more responsive
+			alpha := 0.25
+			if i == len(raw)-1 {
+				alpha = 0.30
+			}
+			pr := prev[i]
+			// if lengths differ, match by index from end
+			if len(prev) != len(raw) {
+				pi := len(prev) - (len(raw) - i)
+				if pi >= 0 && pi < len(prev) {
+					pr = prev[pi]
+				} else {
+					pr = domain.BandwidthSample{}
+				}
+			}
+			rx := alpha*s.RxBps + (1-alpha)*pr.RxBps
+			tx := alpha*s.TxBps + (1-alpha)*pr.TxBps
+			out[i] = domain.BandwidthSample{Time: s.Time, RxBps: rx, TxBps: tx, TotalBps: rx + tx}
+		} else {
+			out[i] = s
+		}
+	}
+	// extra ease on the newest sample against previous newest
+	if len(out) > 0 && len(prev) > 0 {
+		last := &out[len(out)-1]
+		pl := prev[len(prev)-1]
+		last.RxBps = smoothRate(pl.RxBps, last.RxBps)
+		last.TxBps = smoothRate(pl.TxBps, last.TxBps)
+		last.TotalBps = last.RxBps + last.TxBps
+	}
+	return out
 }
 
 func (m *Model) cycleFilter(dir int) {
@@ -348,18 +424,23 @@ func (m *Model) loadFlows() {
 }
 
 func (m *Model) handleClick(x, y int) {
-	if m.height < 10 {
+	if m.height < 10 || m.width < 10 {
 		return
 	}
-	// Header rows 0..headerH-1 are clickable chips + title.
-	if y < m.headerH {
+	// Header rows 0..headerH-1: recompute chips at click time (View is value-receiver).
+	if y >= 0 && y < m.headerH {
 		m.focus = paneHeader
-		// Match chip hitboxes from last render.
-		for _, c := range m.headerChips {
+		_, chips := m.renderAdapterChips(m.width)
+		m.headerChips = chips
+		for _, c := range chips {
 			if x >= c.x0 && x < c.x1 {
 				m.setFilter(c.id)
 				return
 			}
+		}
+		// Click on empty header area → cycle next adapter.
+		if y == 1 {
+			m.cycleFilter(1)
 		}
 		return
 	}
@@ -438,22 +519,36 @@ func (m *Model) renderHeaderFull(w int) string {
 		}
 	}
 
-	// Row 1: full-width bar with title + mode + rates.
-	left := m.theme.Title.Render(" OpenWire ")
-	mid := m.theme.Status.Render(fmt.Sprintf(" %s ", state))
-	if m.status.IsWSL2 {
-		mid += m.theme.Muted.Render(" WSL2 ")
+	// Solid full-width header: build plain text then paint one background style.
+	// (Mixing per-token backgrounds left unstyled padding = "half background".)
+	rx, tx := m.smoothHdrRx, m.smoothHdrTx
+	if rx == 0 && tx == 0 {
+		rx, tx = m.status.TotalRxBps, m.status.TotalTxBps
 	}
-	rates := m.theme.Status.Render(fmt.Sprintf(" ↑%-9s ↓%-9s ",
-		humanRate(m.status.TotalTxBps), humanRate(m.status.TotalRxBps)))
-	row1Content := lipgloss.JoinHorizontal(lipgloss.Top, left, mid, rates)
-	// Stretch to full width with background.
-	row1 := m.theme.HeaderBar.Width(w).Render(padToWidth(row1Content, w))
+	row1Plain := fmt.Sprintf(" OpenWire  %s", state)
+	if m.status.IsWSL2 {
+		row1Plain += "  WSL2"
+	}
+	row1Plain += fmt.Sprintf("   ↑%-9s ↓%-9s", humanRate(tx), humanRate(rx))
+	if m.status.Message != "" {
+		row1Plain += "  " + truncate(m.status.Message, 28)
+	}
+	row1 := m.theme.HeaderBar.Width(w).MaxWidth(w).Render(truncateRunes(row1Plain, w))
 
-	// Row 2: clickable adapter chips spanning full width.
-	row2, chips := m.renderAdapterChips(w)
+	row2Body, chips := m.renderAdapterChips(w)
 	m.headerChips = chips
-	row2 = m.theme.HeaderBar.Width(w).Render(padToWidth(row2, w))
+	// Chips already include background; wrap remainder of line in HeaderBar.
+	chipW := lipgloss.Width(row2Body)
+	pad := ""
+	if chipW < w {
+		pad = strings.Repeat(" ", w-chipW)
+	}
+	row2 := row2Body + m.theme.HeaderBar.Render(pad)
+	if lipgloss.Width(row2) > w {
+		row2 = lipgloss.NewStyle().MaxWidth(w).Render(row2)
+	} else if lipgloss.Width(row2) < w {
+		row2 = row2 + m.theme.HeaderBar.Render(strings.Repeat(" ", w-lipgloss.Width(row2)))
+	}
 
 	return row1 + "\n" + row2
 }
@@ -461,14 +556,13 @@ func (m *Model) renderHeaderFull(w int) string {
 func (m Model) renderAdapterChips(w int) (string, []chip) {
 	active := m.theme.ChipOn
 	idle := m.theme.ChipOff
-	if m.focus == paneHeader {
-		// slight emphasis when header focused
-		idle = idle.Bold(true)
-	}
 
 	var chips []chip
-	var parts []string
-	x := 1 // leading space
+	var b strings.Builder
+	// Start at column 0 so hitboxes match mouse X (0-based cells).
+	x := 0
+	b.WriteString(m.theme.HeaderBar.Render(" "))
+	x++
 
 	add := func(id, label string) {
 		lab := " " + label + " "
@@ -479,8 +573,12 @@ func (m Model) renderAdapterChips(w int) (string, []chip) {
 		rendered := style.Render(lab)
 		width := lipgloss.Width(rendered)
 		chips = append(chips, chip{label: label, id: id, x0: x, x1: x + width})
-		parts = append(parts, rendered)
-		x += width + 1 // gap
+		b.WriteString(rendered)
+		x += width
+		// gap with header background so line stays solid
+		gap := m.theme.HeaderBar.Render(" ")
+		b.WriteString(gap)
+		x += lipgloss.Width(gap)
 	}
 
 	add("", "all")
@@ -492,13 +590,25 @@ func (m Model) renderAdapterChips(w int) (string, []chip) {
 			label = shortName(name, 12)
 		}
 		add(name, label)
-		if x > w-8 {
+		if x > w-10 {
 			break
 		}
 	}
-	hint := m.theme.Muted.Render("  [ ] cycle")
-	parts = append(parts, hint)
-	return " " + strings.Join(parts, " "), chips
+	hint := m.theme.HeaderBar.Render(" [ ]")
+	b.WriteString(hint)
+	return b.String(), chips
+}
+
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		// pad plain so Width(style) fills
+		return s + strings.Repeat(" ", n-len(r))
+	}
+	return string(r[:n])
 }
 
 func shortName(s string, n int) string {
@@ -509,12 +619,30 @@ func shortName(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-func padToWidth(s string, w int) string {
-	pw := lipgloss.Width(s)
-	if pw >= w {
-		return lipgloss.NewStyle().MaxWidth(w).Render(s)
+// formatAppLabel shows "name · pid" (Windows: win/chrome · 1234).
+func formatAppLabel(name string, pid int) string {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "unknown" {
+		if pid > 0 {
+			return fmt.Sprintf("pid:%d", pid)
+		}
+		return "unknown"
 	}
-	return s + strings.Repeat(" ", w-pw)
+	// Already encoded as pid:N
+	if strings.HasPrefix(name, "pid:") {
+		return name
+	}
+	// win/pid:1234 → still try to show pid cleanly
+	if strings.HasPrefix(name, "win/pid:") {
+		if pid > 0 {
+			return fmt.Sprintf("win/? · %d", pid)
+		}
+		return name
+	}
+	if pid > 0 && !strings.Contains(name, "·") {
+		return fmt.Sprintf("%s · %d", name, pid)
+	}
+	return name
 }
 
 func (m Model) renderGraphCompact(innerW int) string {
@@ -571,14 +699,7 @@ func (m Model) renderAppsBody(rows, cols int) string {
 			rate = a.RateInBps + a.RateOutBps
 		}
 		bar := rateBar(rate/maxScale, barW)
-		name := a.Name
-		if name == "" || name == "unknown" {
-			if a.PID > 0 {
-				name = fmt.Sprintf("pid:%d", a.PID)
-			} else {
-				name = "unknown"
-			}
-		}
+		name := formatAppLabel(a.Name, a.PID)
 		line := fmt.Sprintf("%s %s %10s  ↑%-8s ↓%-8s",
 			padRight(truncate(name, nameW), nameW),
 			bar,
@@ -608,7 +729,7 @@ func (m Model) renderDetailBody(rows, cols int) string {
 		return joinFixed(lines, rows, cols)
 	}
 	a := m.apps[m.selected]
-	head := fmt.Sprintf("%s · pid %d · flows %d", truncate(a.Name, 24), a.PID, a.Flows)
+	head := fmt.Sprintf("%s · flows %d", truncate(formatAppLabel(a.Name, a.PID), 28), a.Flows)
 	if a.Path != "" {
 		head += " · " + truncate(a.Path, max(8, cols/3))
 	}

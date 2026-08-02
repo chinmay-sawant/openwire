@@ -20,6 +20,31 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
+func TestFormatAppLabel(t *testing.T) {
+	if got := formatAppLabel("win/chrome", 1234); got != "win/chrome · 1234" {
+		t.Fatalf("got %q", got)
+	}
+	if got := formatAppLabel("unknown", 9); got != "pid:9" {
+		t.Fatalf("got %q", got)
+	}
+	if got := formatAppLabel("browser", 0); got != "browser" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestSmoothRateNoCliff(t *testing.T) {
+	// large drop should not go to zero in one step
+	v := smoothRate(10_000, 0)
+	if v < 1000 {
+		t.Fatalf("decayed too fast: %v", v)
+	}
+	// rise is capped
+	v2 := smoothRate(100, 1_000_000)
+	if v2 > 100*1.4+256+1 {
+		t.Fatalf("rise uncapped: %v", v2)
+	}
+}
+
 func TestSparklineNonEmpty(t *testing.T) {
 	// empty samples handled by renderGraph; sparkline with data:
 	s := sparkline(nil, 10, 3)
