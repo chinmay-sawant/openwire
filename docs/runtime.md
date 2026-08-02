@@ -3,17 +3,28 @@
 ## How to start
 
 ```bash
-openwire start              # live capture (needs privileges on Linux)
-openwire start --demo       # synthetic traffic; no privileges
-openwire start --iface eth0 # pin interface(s)
-openwire start --theme dark # default theme
+openwire start                   # packet capture if privileged, else /proc stats mode
+openwire start --strict-capture  # require AF_PACKET; error if no CAP_NET_RAW
+openwire start --demo            # synthetic traffic; no privileges
+openwire start --iface eth0      # pin interface(s)
+openwire start --theme dark      # default theme
 ```
 
 Single foreground process. No daemon, no installer.
 
+## Capture modes
+
+| Mode | How selected | What it does |
+|------|----------------|--------------|
+| `live` | AF_PACKET open succeeds | Full packet observation + `/proc` process attribution |
+| `stats` | AF_PACKET fails with privilege error (default fallback) | `/proc/net/dev` byte deltas + socket→process weights (best-effort) |
+| `demo` | `--demo` | Synthetic multi-app traffic |
+
+`--strict-capture` disables the `stats` fallback. Demo data is **never** used unless `--demo` is set.
+
 ## Privileges
 
-Live packet capture on Linux uses `AF_PACKET` raw sockets and typically requires:
+Full packet capture on Linux uses `AF_PACKET` raw sockets and typically requires:
 
 - root, or
 - `CAP_NET_RAW` (and often `CAP_NET_ADMIN`) on the binary
@@ -23,7 +34,7 @@ sudo setcap cap_net_raw,cap_net_admin+ep ./bin/openwire
 ./bin/openwire start
 ```
 
-If privileges are missing, OpenWire exits with a clear error unless `--demo` is used. Live mode never silently falls back to fake data.
+Without privileges, OpenWire enters **stats mode** (clearly labeled in the UI) unless `--strict-capture` is set.
 
 ## Where data lives
 
@@ -35,9 +46,15 @@ Logs (if any) go to a file under the state directory so they do not corrupt the 
 
 | Platform | Capture | Notes |
 |----------|---------|--------|
-| Linux | Primary | Adapter discovery + AF_PACKET capture + `/proc` attribution |
-| WSL2 | Supported secondary | Linux adapters + best-effort Windows host adapter listing |
+| Linux | Primary | Adapter discovery + AF_PACKET or `/proc` stats + process attribution |
+| WSL2 | Supported secondary | Linux path as above + best-effort Windows host adapter inventory **and** host byte counters (`windows-host` app) |
 | Windows / macOS native | Out of scope | v0.0.1 |
+
+### WSL2 host traffic (P5.4)
+
+- Host adapters are listed via PowerShell / `ipconfig` when available.
+- Host **byte counters** are sampled via `Get-NetAdapterStatistics` and shown as a synthetic app `windows-host` (not a Linux PID).
+- Per-process Windows attribution is **not** available from inside WSL2; that needs a future native Windows helper.
 
 ## TUI
 

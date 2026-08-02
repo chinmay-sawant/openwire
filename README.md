@@ -17,11 +17,16 @@ No libpcap/CGO: live capture uses pure-Go **AF_PACKET**.
 # Build
 make build
 
-# Demo UI — no root, synthetic traffic
+# Demo UI — synthetic traffic
 ./bin/openwire start --demo
 
-# Live monitor (needs privileges)
+# Default: AF_PACKET if privileged, else unprivileged /proc stats mode
+./bin/openwire start
+
+# Full packet capture (needs privileges)
 sudo ./bin/openwire start
+# or require privileges and fail otherwise:
+./bin/openwire start --strict-capture
 
 # Optional: pin interfaces
 sudo ./bin/openwire start --iface eth0
@@ -35,6 +40,12 @@ sudo setcap cap_net_raw,cap_net_admin+ep ./bin/openwire
 ./bin/openwire start
 ```
 
+Privileged unit proof (optional):
+
+```bash
+make test-live   # docker + CAP_NET_RAW; skips/no-ops if docker unavailable
+```
+
 ## Features (v0.0.1)
 
 | Feature | Status |
@@ -44,11 +55,13 @@ sudo setcap cap_net_raw,cap_net_admin+ep ./bin/openwire
 | Mouse + arrow-key navigation | yes |
 | Linux adapter discovery | yes |
 | Live AF_PACKET capture | yes (needs privileges) |
+| Unprivileged `/proc` stats mode | yes (default fallback) |
 | In-memory store (bounded) | yes |
 | Per-app bandwidth ranking | yes (`/proc` attribution on Linux) |
 | GlassWire-style sparkline graph | yes |
 | Demo mode | yes (`--demo`) |
 | WSL2 host adapter listing | best-effort via `powershell.exe` / `ipconfig.exe` |
+| WSL2 host byte counters | best-effort (`windows-host` app) |
 | SQLite / disk history | later |
 | Firewall / DNS control | no (non-goal) |
 
@@ -81,10 +94,11 @@ adapters ──► capture (demo | AF_PACKET) ──► in-memory store ──�
 
 When OpenWire detects WSL2 it will:
 
-- Capture on **Linux** interfaces as usual (when privileged)
-- Attempt to list **Windows host adapters** (labeled `win:…`)
+- Capture/sample on **Linux** interfaces (AF_PACKET or `/proc` stats)
+- List **Windows host adapters** (labeled `win:…`)
+- Sample host adapter **byte counters** into a synthetic app **`windows-host`**
 
-**Limits:** Windows applications are not Linux PIDs. Per-app attribution inside WSL2 applies to Linux processes only. Host adapter listing is inventory/visibility, not full Windows process monitoring.
+**Limits:** Windows applications are not Linux PIDs. Per-process Windows attribution is not available from inside WSL2 (future native helper). Linux process attribution applies to Linux processes only.
 
 See [`docs/runtime.md`](docs/runtime.md) for the full runtime contract.
 

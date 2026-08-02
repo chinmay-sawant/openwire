@@ -1,7 +1,7 @@
 # OpenWire — Dependencies, Non-Goals, and Open Decisions
 
 > **Parent:** [00-overview.md](00-overview.md)  
-> **Status:** proposed; no implementation started  
+> **Status:** decisions resolved for v0.0.1 implementation  
 > **Estimated effort:** maintained alongside phase execution
 
 ---
@@ -30,7 +30,7 @@ No parallel “Portmaster adapter” or “Gin/React” track in v0.0.1.
 |------|------------|--------|
 | CLI | `spf13/cobra` or stdlib | Keep surface small |
 | TUI | `charmbracelet/bubbletea`, `bubbles`, `lipgloss` | Dark theme via Lip Gloss |
-| Capture | `gopacket` + libpcap **or** pure Go AF_PACKET | Document CGO if used |
+| Capture | pure Go AF_PACKET + `/proc` stats fallback | no CGO / no libpcap |
 | Tests | stdlib `testing` | race tests on store |
 
 Pin versions in `go.mod` at implementation time; do not pre-add unused deps.
@@ -47,16 +47,16 @@ Pin versions in `go.mod` at implementation time; do not pre-add unused deps.
 - Native Windows or macOS capture engines (WSL2 host **listing** is in scope; full native Windows agent is not)  
 - eBPF-based deep attribution (optional future; `/proc` is enough for v0.0.1)  
 
-## Open Decisions (resolve during the named phase, not ad hoc)
+## Resolved Decisions (v0.0.1)
 
-| # | Decision | Default if unspecified | Resolve in |
-|---|----------|------------------------|------------|
-| 1 | Module path | `github.com/chinmay/openwire` or repo-remote path | Phase 1 |
-| 2 | CGO vs pure Go capture | Prefer whatever works reliably on Linux; document | Phase 2 |
-| 3 | Default sort (rate vs total bytes) | Current rate | Phase 4 |
-| 4 | Sample interval / ring length | 1s samples, 60–120 points | Phase 3 |
-| 5 | WSL2 host traffic depth | Adapter list + best-effort counters; honest limits | Phase 5 |
-| 6 | Log destination with TUI active | File under `$XDG_STATE_HOME/openwire/` or `/tmp` | Phase 1 |
+| # | Decision | Resolution |
+|---|----------|------------|
+| 1 | Module path | `github.com/chinmay-sawant/openwire` |
+| 2 | CGO vs pure Go capture | Pure Go AF_PACKET; unprivileged `/proc` stats fallback |
+| 3 | Default sort (rate vs total bytes) | Current rate, then session bytes |
+| 4 | Sample interval / ring length | ~1s samples, 120-point ring |
+| 5 | WSL2 host traffic depth | Adapter list + host byte counters as `windows-host` app |
+| 6 | Log destination with TUI active | `$XDG_STATE_HOME/openwire/openwire.log` (or `~/.local/state/openwire/`) |
 
 ## Withdrawn Plan Material
 

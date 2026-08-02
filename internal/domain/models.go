@@ -110,8 +110,9 @@ type BandwidthSample struct {
 type CaptureMode string
 
 const (
-	ModeLive CaptureMode = "live"
-	ModeDemo CaptureMode = "demo"
+	ModeLive  CaptureMode = "live"  // AF_PACKET packet capture (privileged)
+	ModeStats CaptureMode = "stats" // unprivileged /proc interface + socket sampling
+	ModeDemo  CaptureMode = "demo"  // synthetic traffic
 )
 
 // Status is a snapshot of runtime health for the status bar.

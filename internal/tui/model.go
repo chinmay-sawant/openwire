@@ -239,16 +239,17 @@ func (m Model) View() string {
 }
 
 func (m Model) renderHeader() string {
-	mode := string(m.status.Mode)
-	if mode == "" {
-		mode = "unknown"
-	}
 	state := "idle"
 	if m.status.Running {
 		state = "live"
 	}
-	if m.status.Mode == domain.ModeDemo {
+	switch m.status.Mode {
+	case domain.ModeDemo:
 		state = "demo"
+	case domain.ModeStats:
+		state = "stats"
+	case domain.ModeLive:
+		state = "live"
 	}
 	parts := make([]string, 0, 8)
 	for _, a := range m.adapters {
