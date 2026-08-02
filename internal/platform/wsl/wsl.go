@@ -44,9 +44,13 @@ func ListWindowsHostAdapters(ctx context.Context) []domain.Adapter {
 }
 
 func fromPowerShell(ctx context.Context) []domain.Adapter {
+	ps := powershellPath()
+	if ps == "" {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-Command",
+	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-Command",
 		"Get-NetAdapter | Select-Object Name,Status,MacAddress,ifIndex | ConvertTo-Csv -NoTypeInformation")
 	out, err := cmd.Output()
 	if err != nil {
@@ -82,9 +86,13 @@ func fromPowerShell(ctx context.Context) []domain.Adapter {
 }
 
 func fromIPConfig(ctx context.Context) []domain.Adapter {
+	bin := ipconfigPath()
+	if bin == "" {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ipconfig.exe", "/all")
+	cmd := exec.CommandContext(ctx, bin, "/all")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil

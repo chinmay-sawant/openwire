@@ -36,7 +36,11 @@ Get-NetAdapter | ForEach-Object {
   }
 }
 `
-	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-Command", script)
+	ps := powershellPath()
+	if ps == "" {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-Command", script)
 	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
 		return nil

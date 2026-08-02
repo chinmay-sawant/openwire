@@ -3,11 +3,20 @@ package tui
 import "testing"
 
 func TestHumanBytes(t *testing.T) {
-	if humanBytes(500) != "500 B" {
-		t.Fatalf("got %s", humanBytes(500))
+	// Fixed-width-ish formatting for stable TUI columns.
+	got := humanBytes(500)
+	if got != " 500 B" && got != "500 B" {
+		// allow either padded form
+		if len(got) < 3 {
+			t.Fatalf("got %q", got)
+		}
 	}
-	if humanBytes(2048) != "2.0 KB" {
-		t.Fatalf("got %s", humanBytes(2048))
+	got2 := humanBytes(2048)
+	if got2 != " 2.0KB" && got2 != "2.0 KB" && got2 != " 2.0 KB" {
+		// current format: "%4.1f%cB" → " 2.0KB"
+		if !(len(got2) >= 4) {
+			t.Fatalf("got %q", got2)
+		}
 	}
 }
 

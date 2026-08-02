@@ -54,7 +54,11 @@ Get-NetUDPEndpoint | ForEach-Object {
   Emit-Row 'udp' $_.OwningProcess $_.LocalAddress $_.LocalPort '' 0
 }
 `
-	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-Command", script)
+	ps := powershellPath()
+	if ps == "" {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-Command", script)
 	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
 		return nil
