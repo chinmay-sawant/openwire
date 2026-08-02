@@ -24,6 +24,10 @@ func TestFormatAppLabel(t *testing.T) {
 	if got := formatAppLabel("win/chrome", 1234); got != "win/chrome · 1234" {
 		t.Fatalf("got %q", got)
 	}
+	// Linux apps must NOT append pid.
+	if got := formatAppLabel("node", 99999); got != "node" {
+		t.Fatalf("linux label should be name only, got %q", got)
+	}
 	if got := formatAppLabel("unknown", 9); got != "pid:9" {
 		t.Fatalf("got %q", got)
 	}

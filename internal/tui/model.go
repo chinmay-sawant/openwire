@@ -619,7 +619,9 @@ func shortName(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// formatAppLabel shows "name · pid" (Windows: win/chrome · 1234).
+// formatAppLabel builds a list label.
+// Windows apps: "win/chrome · 1234" (name + pid).
+// Linux/local apps: process/binary name only (no trailing pid clutter).
 func formatAppLabel(name string, pid int) string {
 	name = strings.TrimSpace(name)
 	if name == "" || name == "unknown" {
@@ -628,20 +630,25 @@ func formatAppLabel(name string, pid int) string {
 		}
 		return "unknown"
 	}
-	// Already encoded as pid:N
 	if strings.HasPrefix(name, "pid:") {
 		return name
 	}
-	// win/pid:1234 → still try to show pid cleanly
-	if strings.HasPrefix(name, "win/pid:") {
-		if pid > 0 {
-			return fmt.Sprintf("win/? · %d", pid)
+	// Windows host processes — show name + pid as requested.
+	if strings.HasPrefix(name, "win/") {
+		base := strings.TrimPrefix(name, "win/")
+		if strings.HasPrefix(base, "pid:") {
+			// unresolved name — still show pid once
+			if pid > 0 {
+				return fmt.Sprintf("win/? · %d", pid)
+			}
+			return name
+		}
+		if pid > 0 && !strings.Contains(name, "·") {
+			return fmt.Sprintf("%s · %d", name, pid)
 		}
 		return name
 	}
-	if pid > 0 && !strings.Contains(name, "·") {
-		return fmt.Sprintf("%s · %d", name, pid)
-	}
+	// Linux / demo / other: name only (binary/comm), not "node · 12345".
 	return name
 }
 
